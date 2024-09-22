@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
 
-from indicators.support_resistance import get_ticker, support_resistance
+from indicators.support_resistance_window import get_ticker, support_resistance
 
 class TestSupportResistance(unittest.TestCase):
 

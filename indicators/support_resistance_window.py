@@ -14,6 +14,7 @@ LICENSE: MIT LICENSE
 '''
 
 import mplfinance as mpf
+import plotly.graph_objects as go
 
 # Add the parent directory to sys.path
 import os
@@ -27,28 +28,35 @@ from data.ticker_utils import get_ticker
 #To find the support and resistance levels, we will use the rolling minimum and maximum functions in pandas.
 #The rolling minimum and maximum functions will calculate the minimum and maximum values over a specified window size.
 def support_resistance(data, window=20):
-    support = data['Low'].rolling(window=window).min()
-    resistance = data['High'].rolling(window=window).max()
+    support = data['low'].rolling(window=window).min()
+    resistance = data['high'].rolling(window=window).max()
     return support, resistance
 
 
 # Minimum frequency of support and resistance levels to be considered as major levels (i.e. how many times the value was reached)
 def find_major_levels(data,min_freq_s=2, min_freq_r=2,window=20):
-    support, resistance = support_resistance(data, window)
-    data['Support'] = support
-    data['Resistance'] = resistance
-    print(data.head())
-
-    ms = data.Support.value_counts()
-    mr = data.Resistance.value_counts()
-    print('Support:', ms)
-    print('Resistance:', mr)
-    major_support =  ms[ms >= min_freq_s].keys()
-    major_resistance = mr[mr >= min_freq_r].keys()
-    print('Major Support:', major_support)
-    print('Major Resistance:', major_resistance)
-    #TODO: Define algorithm to reduce cluttering on values (i.e. if 2 values are very close to each other, remove one)
+    try:
+        support, resistance = support_resistance(data, window)
+        data['support'] = support
+        data['resistance'] = resistance
+        #print(data.head())
+    except:
+        print('Error calculating support and resistance levels. Window size might be too large/too small')
+        return None,None,None,None
     
+    ms = data.support.value_counts()
+    mr = data.resistance.value_counts()
+    #print('Support:', ms)
+    #print('Resistance:', mr)
+    try:
+        major_support =  ms[ms >= min_freq_s].keys()
+        major_resistance = mr[mr >= min_freq_r].keys()
+        #print('Major Support:', major_support)
+        #print('Major Resistance:', major_resistance)
+    except:
+        print('Error finding major support and resistance levels. Frequency might be too high or data might be too small')
+        return None,None,None,None
+    #TODO: Define algorithm to reduce cluttering on values (i.e. if 2 values are very close to each other, remove one)
     return major_support,major_resistance,support,resistance
 
 # Plot the support and resistance levels on a candlestick chart using the mplfinance library.
@@ -64,15 +72,56 @@ def plot_support_resistance(data, major_support, major_resistance):
 # hlines is used to plot horizontal lines on the chart for the support and resistance levels.
     mpf.plot(data, type='candle', style='charles', title='Candlestick Chart', ylabel='Price', hlines=dict(hlines=sp+res, colors=['b'], linestyle='--'))
 
+# Plot the support and resistance levels on a candlestick chart using the Plotly library.
+def plot_support_resistance_ploty(data, major_support, major_resistance):
+    fig = go.Figure()
+    # Add candlestick trace
+    fig.add_trace(go.Candlestick(
+        x=data.index,
+        open=data['open'],
+        high=data['high'],
+        low=data['low'],
+        close=data['close'],
+        name='Candlesticks',
+        hovertext=data['date'].dt.strftime('%d/%m/%Y %H:%M')
+    ))
+    # Add support lines
+    for s in major_support:
+        # TODO: Define algorithm to reduce cluttering on the plot
+        fig.add_hline(y=s, line=dict(color='green', dash='dash'), name='Support')
 
-def find_support_resistance_levels(stock_symbol, timespan, time, window=20, min_freq_s=2, min_freq_r=2):
-    data = get_ticker(stock_symbol, timespan, time)
+    # Add resistance lines
+    for r in major_resistance:
+        fig.add_hline(y=r, line=dict(color='red', dash='dash'), name='Resistance')
+
+    # Update layout
+    fig.update_layout(
+        title='Support and Resistance with Rolling Window',
+        yaxis_title='Price',
+        xaxis_title='Date',
+        xaxis_rangeslider_visible=False
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(paper_bgcolor='black', plot_bgcolor='black')
+    fig.show()
+
+def find_support_resistance_levels(stock_symbol, timespan, time, window=40, min_freq_s=4, min_freq_r=8):
+    try:
+        data = get_ticker(stock_symbol, timespan, time)
+    except:
+        print('Error fetching data')
+        return None,None,None
     major_support, major_resistance,support,resistance = find_major_levels(data,min_freq_s,min_freq_r,window)
     return data,major_support, major_resistance
 
+
+
+
 def example():
     df_daily,major_support, major_resistance = find_support_resistance_levels('AAPL', '5d', '15m')
-    plot_support_resistance(df_daily, major_support, major_resistance)
+    #plot_support_resistance(df_daily, major_support, major_resistance)
+    plot_support_resistance_ploty(df_daily, major_support, major_resistance)
 
 '''
 # Split data based on date and time

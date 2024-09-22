@@ -9,13 +9,19 @@ def get_ticker(stock_symbol, timespan, time):
     ticker = yf.Ticker(stock_symbol)
     # Fetch historical data from yfinance
     data = ticker.history(period=timespan, interval=time)
+    #Rename headers to lowercase
+    data.columns = data.columns.str.lower()
+    # Add datetime as a column
+    data['date'] = data.index
+    data.reset_index(drop=True, inplace=True)
     return data
 
 def example():
     data = get_ticker('AAPL', '1d', '1m')
     print(data.head())
     mpf.plot(data, type='candle', style='charles', title='Candlestick Chart', ylabel='Price')
-    
+
+#example() 
 # Suppose that you have dataframe like the below.
 #             date    open    high     low   close     volume
 # 0     2018-12-31  244.92  245.54  242.87  245.28  147031456
