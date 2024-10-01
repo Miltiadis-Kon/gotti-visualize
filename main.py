@@ -1,5 +1,5 @@
 from indicators.support_resistance_window import find_support_resistance_levels, plot_support_resistance, plot_support_resistance_ploty
-from indicators.support_resistance_pivotpoints import find_pivot_points, plot_support_resistance_pivotpoints
+from indicators.support_resistance_pivotpoints import find_pivot_points, plot_support_resistance_pivotpoints,histogram
 
 
 def compare(major_support,major_resistance,pivot_support,pivot_resistance,minor_threshold=0.1) :
@@ -37,9 +37,9 @@ def print_sr(major_support,major_resistance,pivot_support,pivot_resistance,commo
     print('*'*40) 
 
 def main(plot=True,plot_common=False):
-    #TODO: Define dictionary or algo to assign timeframe to frequency and window size ratio 
-    # (1d,15m = 20window,2freq is ok) but for 5d it clutters a lot 
+    #TODO : Fine-tune the window size and frequency (1d,15m = 20window,2freq is ok) but for 5d it clutters a lot
     data,major_support, major_resistance = find_support_resistance_levels('AAPL', '5d', '15m')
+    #TODO : Fine-tune neigbours for pivot points
     data,pivot_support, pivot_resistance = find_pivot_points('AAPL', '5d', '15m',10,10)
     
     #TODO: Define a threshold for comparison of support and resistance levels
@@ -50,11 +50,10 @@ def main(plot=True,plot_common=False):
     if plot_common:
         plot_support_resistance_ploty(data, common_support, common_resistance)
         
-    
     if plot:
         #plot_support_resistance(df_daily, major_support, major_resistance)
         plot_support_resistance_ploty(data, major_support, major_resistance)
         plot_support_resistance_pivotpoints(data)
 
 if __name__ == '__main__':
-    main(plot=False,plot_common=True)
+    main(plot=True,plot_common=False)
