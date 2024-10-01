@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from collections import defaultdict
 
 import os
 import sys
@@ -79,8 +80,51 @@ def optimize(time):
 def getPivot(data, time):
     window = optimize(time)
     data['pivot'] = data.apply(lambda x: isPivot(data, x.name, window), axis=1)
+    '''
+    OLD METHOD
+    TODO:REDUCE IT DOWN TO A SINGLE ITERATION
+    lows=[]
+    highs=[]
+    for i in range(0,len(data)):
+        if data['pivot'][i]==1:
+            lows.append(data['low'][i])
+        elif data['pivot'][i]==2:
+            highs.append(data['high'][i])          
+    optimizePivot(highs)
+    optimizePivot(lows)    
+    '''
+    tolerance = 0 # 5% tolerance
+    #data = update_pivot_values(data,'high',tolerance)
+    data = update_pivot_values(data,tolerance)
     data['pointpos'] = data.apply(lambda row: pointpos(row), axis=1)
     return data
+
+
+#TODO: FIX this
+def update_pivot_values(df, tolerance=0.1):
+    # Function to find values within tolerance range
+    def find_within_range(series, value, tolerance):
+        lower_bound = value * (1 - tolerance)
+        upper_bound = value * (1 + tolerance)
+        return (series >= lower_bound) & (series <= upper_bound)
+
+    # Update pivot = 1 values
+    pivot_1_mask = df['pivot'] == 1
+    pivot_1_values = df.loc[pivot_1_mask, 'low']
+    
+    for idx, value in pivot_1_values.items():
+        within_range = find_within_range(df.loc[pivot_1_mask, 'low'], value, tolerance)
+        df.loc[pivot_1_mask & within_range & (df.index != idx), 'pivot'] = 0
+
+    # Update pivot = 2 values
+    pivot_2_mask = df['pivot'] == 2
+    pivot_2_values = df.loc[pivot_2_mask, 'high']
+    
+    for idx, value in pivot_2_values.items():
+        within_range = find_within_range(df.loc[pivot_2_mask, 'high'], value, tolerance)
+        df.loc[pivot_2_mask & within_range & (df.index != idx), 'pivot'] = 0
+
+    return df
 
 '''
 Each trading session is 6:30 hours = 390 minutes
