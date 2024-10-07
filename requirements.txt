@@ -5,5 +5,7 @@ matplotlib
 mplfinance
 stock_indicators
 plotly
-TA-Lib
 pandas_ta
+flask
+kaggle
+schedule
