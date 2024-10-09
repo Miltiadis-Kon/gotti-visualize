@@ -9,3 +9,4 @@ pandas_ta
 schedule
 dash
 pydrive
+python-dotenv

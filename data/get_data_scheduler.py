@@ -13,14 +13,24 @@ import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+import json
+from dotenv import load_dotenv
 
 
 def auth():
+    load_dotenv()
     # Define the Google Drive API scopes and service account file path
     SCOPES = ['https://www.googleapis.com/auth/drive']
-    SERVICE_ACCOUNT_FILE = "data/gotti-438110-2e68d36f5a13.json"
-    # Create credentials using the service account file
-    credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    # Decode the JSON string from the environment variable
+    google_json = os.getenv('GOOGLE_JSON')
+    if not google_json:
+        raise ValueError("The GOOGLE_JSON environment variable is not set.")
+    
+    credentials_info = json.loads(google_json)
+    
+    # Create credentials using the decoded JSON
+    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+    
     # Build the Google Drive service
     drive_service = build('drive', 'v3', credentials=credentials)
     return drive_service
@@ -152,6 +162,7 @@ def create_folder(folder_name, parent_folder_id=None):
 if __name__ == "__main__":
     try:
         print("Scheduler started. Waiting for market close...")
-        schedule_market_close()
+        #schedule_market_close()
+        test()
     except (KeyboardInterrupt, SystemExit):
         pass
