@@ -13,8 +13,5 @@
       }
     ],
     "build": {
-      "env": {
-        "GOOGLE_JSON": "@google_json"
-      }
     }
   }
