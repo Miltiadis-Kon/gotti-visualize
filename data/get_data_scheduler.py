@@ -162,7 +162,7 @@ def create_folder(folder_name, parent_folder_id=None):
 if __name__ == "__main__":
     try:
         print("Scheduler started. Waiting for market close...")
-        #schedule_market_close()
-        test()
+        schedule_market_close()
+        #test()
     except (KeyboardInterrupt, SystemExit):
         pass

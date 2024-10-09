@@ -1,0 +1,20 @@
+{
+    "version": 2,
+    "builds": [
+      {
+        "src": "visualize/data/get_data_scheduler.py",
+        "use": "@vercel/python"
+      }
+    ],
+    "routes": [
+      {
+        "src": "/(.*)",
+        "dest": "visualize/data/get_data_scheduler.py"
+      }
+    ],
+    "build": {
+      "env": {
+        "GOOGLE_JSON": "@google_json"
+      }
+    }
+  }
