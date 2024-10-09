@@ -6,6 +6,6 @@ mplfinance
 stock_indicators
 plotly
 pandas_ta
-flask
-kaggle
 schedule
+dash
+pydrive

@@ -1,13 +1,12 @@
 # Import the yfinance library
 import yfinance as yf
-import mplfinance as mpf
 import pandas as pd
-import os
+import plotly.graph_objects as go
 
 # Function to get the ticker data
 # timespan: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
 # time : 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
-accepted_times = ['15m','1h','30m']
+accepted_times = ['5m','15m','1h','30m']
 
 def get_ticker(stock_symbol, timespan, time):
     if not time in accepted_times:
@@ -23,8 +22,6 @@ def get_ticker(stock_symbol, timespan, time):
     data.reset_index(drop=True, inplace=True)
     return data
 
-
-from datetime import datetime, timedelta
 
 def fetch_and_save_stock_data(ticker, start_date, end_date, filename):
     # Fetch the stock data
@@ -68,10 +65,7 @@ def categorize_by_market_cap(df):
 
     return categorized_df 
 
-def sort_by_sector(file_path):
-    # Read the CSV file into a DataFrame
-    df = pd.read_csv(file_path)
-    # For each sector create a new DataFrame 
+def sort_by_sector(df):
     sectors = df['Sector'].unique()
     sector_df = {}
     for sector in sectors:
@@ -93,22 +87,114 @@ def sort_by_abs_percent_change(sectors):
         sorted_sectors[sector] = df.sort_values(by='% Change', key=abs, ascending=False)
     return sorted_sectors
 
+def remove_microcaps(df):
+    '''
+    Remove stock with Market Cap < 1B, as penny stocks perform unpredictable!
+    '''
+    if 'Market Cap' in df.columns:
+        df = df[df['Market Cap'] >= 10**9]
+    return df
+
+def remove_low_vol(df):
+    '''
+    To reduce such risk, 
+    it's best to stick with stocks that have a minimum dollar volume of
+    $20 million to $25 million. 
+    But we are risky too so we will go a bit lower!
+    $2 million
+    '''
+    if 'Volume' in df.columns:
+        df = df[df['Volume'] >= 2*10**6]
+    return df
 
 def screen_all(file_path):
+    df = pd.read_csv(file_path)
+    # Convert 'Market Cap' to numeric, errors='coerce' will turn non-numeric values into NaN
+    df['Market Cap'] = pd.to_numeric(df['Market Cap'], errors='coerce')
+    # Drop rows with NaN values in 'Market Cap'
+    df = df.dropna(subset=['Market Cap'])
+    #Drop IPO year and country
+    df = df.drop(columns=['IPO Year', 'Country'])
+    #Further data processing
+    df = remove_microcaps(df) # Comment this in order to uncomment Micro,Nano Caps
+    df = remove_low_vol(df)
     #Sort by sector
-    sectors = sort_by_sector(file_path)
-    #Categorize each sector by market cap 
-    mcap = categorize_by_market_cap(sectors)
-    # Categorize each market cap by volume
-    volume_map = sort_by_volume(mcap)
-    #Get first 100 stocks by volume for each market cap
-    for key in volume_map.keys():
-        volume_map[key] = volume_map[key].head(100)
-    return volume_map
+    sectors = sort_by_sector(df)
+    #Categorize each sector by market cap(Large Cap,Mid Cap etc) & sort by volume ( high volume = high payoff)
+    for key in sectors.keys():
+        sectors[key] = categorize_by_market_cap(sectors[key])
+        sectors[key] = sort_by_volume(sectors[key])
+    return sectors
 
-screener = screen_all('data/nasdaq_screener_all.csv')
-print(screener)
-    
+def present_screener(screener):
+    # Create lists to hold table data
+    sectors_list = []
+    categories_list = []
+    tickers_list = []
+    market_caps_list = []
+    volumes_list = []
+    percent_changes_list = []
+
+    for sector, categories in screener.items():
+        for category, df in categories.items():
+            for _, row in df.iterrows():
+                sectors_list.append(sector)
+                categories_list.append(category)
+                tickers_list.append(row['Symbol'])
+                market_caps_list.append(row['Market Cap'])
+                volumes_list.append(row['Volume'])
+                percent_changes_list.append(row['% Change'])
+
+    # Create a Plotly table
+    fig = go.Figure(data=[go.Table(
+        header=dict(values=["Sector", "Category", "Ticker", "Market Cap", "Volume", "% Change"],
+                    fill_color='paleturquoise',
+                    align='left'),
+        cells=dict(values=[sectors_list, categories_list, tickers_list, market_caps_list, volumes_list, percent_changes_list],
+                   fill_color='lavender',
+                   align='left'))
+    ])
+    fig.update_layout(title='Stock Screener Results')
+    fig.show()
+
+def print_screener_length(screener):
+    total_length = 0
+    for sector, categories in screener.items():
+        for category, df in categories.items():
+            total_length += len(df)
+    print(f"Total number of rows in screener: {total_length}")
+
+
+def get_screened_tickers(screener):
+    tickers = []
+    for sector, categories in screener.items():
+        for category, df in categories.items():
+            tickers.extend(df['Symbol'].tolist())
+    return tickers
+
+
+
+# Example usage
+def example():
+    screener = screen_all('nasdaq_screener_all.csv')
+    print_screener_length(screener)
+    tickers = get_screened_tickers(screener)
+    for ticker in tickers:
+        data = get_ticker(ticker, '5d', '5m')
+        #post_process(data) # Add your post-processing logic here (breakout pivot points etc..)
+                        #add data to DB
+
+
+
+'''
+OUTPUT DATA FORMAT:
+{'Sector': 
+    {'Large Cap': Symbol  ... Industry},
+    {'Small Cap' : Symbol ... Industry}
+}
+'''
+
+
 '''
 # Example usage
 ticker_symbol = "AAPL"  # Apple Inc.

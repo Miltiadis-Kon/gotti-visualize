@@ -5,6 +5,7 @@ __pycache__/
 
 # Env
 .env
+data/gotti-438110-2e68d36f5a13.json
 # C extensions
 *.so
 

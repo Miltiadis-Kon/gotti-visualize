@@ -26,7 +26,18 @@ gotti-visualize/
 ├── main.py
 └── requirements.txt
 ```
-
+### Visualisation
+An oversimplified UI has been added to preview all sectors and all tickers registered under NASDAQ.
+Volume and Market Cap filters have been applied to reduce cluttering and non-tradable (by my decision) symbols.To view simply run 
+```
+cd .\data\
+python app.py
+```
+And then proceed to 
+```
+http://localhost:port/dashboard/
+```
+NOTE : Replace localhost:port with given parameters
 ### Contribution
 We welcome contributions to this project! To contribute, please follow these steps:
 
