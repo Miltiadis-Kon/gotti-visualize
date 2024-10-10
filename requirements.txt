@@ -10,3 +10,4 @@ schedule
 dash
 pydrive
 python-dotenv
+scipy
