@@ -26,6 +26,32 @@ gotti-visualize/
 ├── main.py
 └── requirements.txt
 ```
+
+
+### Setup
+TA-LIB has been added to the project!! This means that numpy and pandas had to be downgraded as well!! 
+To install :
+1. Create conda env
+```
+conda create --name gotti python=3.12
+conda activate 
+```
+2. Install TALIB
+```
+conda install -c conda-forge libta-lib
+conda install -c conda-forge ta-lib
+```
+
+3. Install requirements
+```
+pip install -r requirements.txt
+``` 
+
+### IMPORTANT
+This repo might be used in the future **ONLY** to generate, preproccess and visualize data.
+Then create a new repo to implement further data processing and machine learning models.
+This is to ensure that the project remains clean, easy to understand and most important, beacuase numpy and pandas had to be downgraded to install TA-LIB.
+
 ### Visualisation
 An oversimplified UI has been added to preview all sectors and all tickers registered under NASDAQ.
 Volume and Market Cap filters have been applied to reduce cluttering and non-tradable (by my decision) symbols.To view simply run 

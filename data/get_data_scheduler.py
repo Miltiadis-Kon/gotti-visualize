@@ -40,7 +40,7 @@ def update_db(param):
     drive_service = auth()
     ticker = param['symbol']
     data = param['data']
-    logging.info(f"Updating database for {ticker} at {datetime.now(pytz.timezone('US/Eastern'))}...")
+    print(f"Updating database for {ticker} at {datetime.now(pytz.timezone('US/Eastern'))}...")
     # Convert data to CSV format
     csv_data = data.to_csv(index=False)
     # Save CSV to a temporary file
@@ -52,16 +52,16 @@ def update_db(param):
         'name': temp_file,
     }
     media = drive_service.files().create(body=file_metadata, media_body=temp_file).execute()
-    logging.info(f"File ID: {media.get('id')}")
+    print(f"File ID: {media.get('id')}")
     # Delete the temporary file
     os.remove(temp_file)
-    logging.info(f"Database updated for {ticker} at {datetime.now(pytz.timezone('US/Eastern'))}.")
+    print(f"Database updated for {ticker} at {datetime.now(pytz.timezone('US/Eastern'))}.")
     return True
     
 
 def end_of_market_function():
     # This function will be called at the end of each market day
-    logging.info(f"Market closed. Running end-of-day function at {datetime.now(pytz.timezone('US/Eastern'))}")
+    print(f"Market closed. Running end-of-day function at {datetime.now(pytz.timezone('US/Eastern'))}")
     # Add your daily tasks here:
     screener = screen_all('nasdaq_screener_all.csv')
     tickers = get_screened_tickers(screener)
@@ -109,7 +109,7 @@ def download_file(file_id, destination_path):
     done = False
     while not done:
         status, done = downloader.next_chunk()
-        logging.info(f"Download {int(status.progress() * 100)}%.")
+        print(f"Download {int(status.progress() * 100)}%.")
 
 
 def delete_files(file_or_folder_id):
@@ -117,10 +117,10 @@ def delete_files(file_or_folder_id):
     drive_service = auth()
     try:
         drive_service.files().delete(fileId=file_or_folder_id).execute()
-        logging.info(f"Successfully deleted file/folder with ID: {file_or_folder_id}")
+        print(f"Successfully deleted file/folder with ID: {file_or_folder_id}")
     except Exception as e:
-        logging.info(f"Error deleting file/folder with ID: {file_or_folder_id}")
-        logging.info(f"Error details: {str(e)}")
+        print(f"Error deleting file/folder with ID: {file_or_folder_id}")
+        print(f"Error details: {str(e)}")
 
 
 def list_folder(parent_folder_id=None, delete=False):
@@ -134,11 +134,11 @@ def list_folder(parent_folder_id=None, delete=False):
     items = results.get('files', [])
 
     if not items:
-        logging.info("No folders or files found in Google Drive.")
+        print("No folders or files found in Google Drive.")
     else:
-        logging.info("Folders and files in Google Drive:")
+        print("Folders and files in Google Drive:")
         for item in items:
-            logging.info(f"Name: {item['name']}, ID: {item['id']}, Type: {item['mimeType']}")
+            print(f"Name: {item['name']}, ID: {item['id']}, Type: {item['mimeType']}")
             if delete:
                 delete_files(item['id'])
 
@@ -157,12 +157,12 @@ def create_folder(folder_name, parent_folder_id=None):
         fields='id'
     ).execute()
 
-    logging.info(f'Created Folder ID: {created_folder["id"]}')
+    print(f'Created Folder ID: {created_folder["id"]}')
     return created_folder["id"]
 
 if __name__ == "__main__":
     try:
-        logging.info("Scheduler started. Waiting for market close...")
+        print("Scheduler started. Waiting for market close...")
         schedule_market_close()
         #test()
     except (KeyboardInterrupt, SystemExit):
