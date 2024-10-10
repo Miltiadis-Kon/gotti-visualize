@@ -47,9 +47,17 @@ conda install -c conda-forge ta-lib
 pip install -r requirements.txt
 ``` 
 
+### Common errors and workarounds
+1. **Numpy and Pandas version conflict**
+Downgrade numpy and pandas respectively
+    ```
+    pip install "pandas<2.2.1" --force-reinstall 
+    pip install "numpy<2.0.0" --force-reinstall 
+    ```
+
 ### IMPORTANT
 This repo might be used in the future **ONLY** to generate, preproccess and visualize data.
-Then create a new repo to implement further data processing and machine learning models.
+A new repo will be created to implement further data processing and machine learning models.
 This is to ensure that the project remains clean, easy to understand and most important, beacuase numpy and pandas had to be downgraded to install TA-LIB.
 
 ### Visualisation
