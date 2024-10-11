@@ -52,6 +52,7 @@ conda install -c conda-forge ta-lib
 3. Install requirements.
 
 ```python
+cd path/to/project
 pip install -r requirements.txt
 ```
 
@@ -64,6 +65,9 @@ Downgrade numpy and pandas respectively
     pip install "pandas<2.2.1" --force-reinstall 
     pip install "numpy<2.0.0" --force-reinstall 
     ```
+2. **TA-LIB library missing**
+For all TA-LIB related problems refer here: https://github.com/ta-lib/ta-lib-python
+Or here : https://github.com/TA-Lib/ta-lib
 
 ### IMPORTANT
 
