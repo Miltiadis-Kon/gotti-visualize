@@ -1,0 +1,68 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Chart with Buy/Sell Markers</title>
+    <script src="https://cdn.jsdelivr.net/npm/scichart/_wasm/scichart.browser.js"></script>
+    <style>
+        #scichart-root { width: 800px; height: 600px; }
+    </style>
+</head>
+<body>
+    <div id="scichart-root"></div>
+    
+    <script>
+        // Load the chart data passed from Flask
+        const chartData = JSON.parse('{{ chart_data|tojson|safe }}');
+        console.log(chartData);
+        async function initSciChart() {
+            // Initialize SciChart
+            const { SciChartSurface, NumericAxis, CandlestickSeries, XyDataSeries, EllipsePointMarker } = SciChart;
+            
+            const { wasmContext, sciChartSurface } = await SciChartSurface.create("scichart-root");
+            
+            // Create X and Y axes
+            const xAxis = new NumericAxis(wasmContext);
+            const yAxis = new NumericAxis(wasmContext);
+            sciChartSurface.xAxes.add(xAxis);
+            sciChartSurface.yAxes.add(yAxis);
+            
+            // Create candlestick series
+            const candlestickSeries = new CandlestickSeries(wasmContext, {
+                dataSeriesO: new XyDataSeries(wasmContext),
+                dataSeriesH: new XyDataSeries(wasmContext),
+                dataSeriesL: new XyDataSeries(wasmContext),
+                dataSeriesC: new XyDataSeries(wasmContext)
+            });
+            
+            // Add data to the series
+            chartData.forEach((data, index) => {
+                candlestickSeries.dataSeriesO.appendRange(chartData.date, chartData.open);
+candlestickSeries.dataSeriesH.appendRange(chartData.date, chartData.high);
+candlestickSeries.dataSeriesL.appendRange(chartData.date, chartData.low);
+candlestickSeries.dataSeriesC.appendRange(chartData.date, chartData.close);
+            });
+            
+            sciChartSurface.renderableSeries.add(candlestickSeries);
+            
+            // Add buy/sell markers (this is just an example, you'd need to calculate these positions)
+            const buyMarkers = new XyDataSeries(wasmContext);
+            const sellMarkers = new XyDataSeries(wasmContext);
+            
+            // Example: Add a buy marker at index 10 and a sell marker at index 20
+            buyMarkers.append(10, chartData[10].low);
+            sellMarkers.append(20, chartData[20].high);
+            
+            const buyPointMarker = new EllipsePointMarker(wasmContext, { width: 15, height: 15, fill: "green" });
+            const sellPointMarker = new EllipsePointMarker(wasmContext, { width: 15, height: 15, fill: "red" });
+            
+            sciChartSurface.renderableSeries.add(buyPointMarker);
+            sciChartSurface.renderableSeries.add(sellPointMarker);
+        }
+        
+        initSciChart();
+    </script>
+</body>
+</html>

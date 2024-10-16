@@ -63,7 +63,7 @@ def end_of_market_function():
     # This function will be called at the end of each market day
     print(f"Market closed. Running end-of-day function at {datetime.now(pytz.timezone('US/Eastern'))}")
     # Add your daily tasks here:
-    screener = screen_all('nasdaq_screener_all.csv')
+    screener = screen_all('data/nasdaq_screener_all.csv')
     tickers = get_screened_tickers(screener)
     background_tasks = set()  # Create a set to store the background tasks
 
@@ -71,8 +71,7 @@ def end_of_market_function():
         data = get_ticker(ticker, '5d', '5m')  # Get the data from Yahoo Finance
         # data = post_process(data)  # Add your post-processing logic here (breakout pivot points etc..)
         param = {'symbol': ticker, 'data': data}
-        task = asyncio.create_task(update_db(param=param))  # Create a background task for each ticker
-        background_tasks.add(task)
+        update_db(param=param)
     
 
 def schedule_market_close():
@@ -85,7 +84,7 @@ def schedule_market_close():
     schedule.every().wednesday.at("16:00").timezone(eastern).do(end_of_market_function)
     schedule.every().thursday.at("16:00").timezone(eastern).do(end_of_market_function)
     '''
-    schedule.every().friday.at("23:05").do(end_of_market_function)
+    schedule.every().friday.at("22:39").do(end_of_market_function)
 
     # Keep the script running
     while True:

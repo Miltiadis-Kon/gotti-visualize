@@ -1,0 +1,9 @@
+{
+    "python.analysis.extraPaths": [
+        "./indicators/general",
+        "./indicators/technical",
+        "./indicators/candlesticks",
+        "./indicators/strategies",
+        "./data",
+    ]
+}

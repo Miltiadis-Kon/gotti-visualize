@@ -139,9 +139,6 @@ if __name__ == '__main__':
     df.rename(columns={'Datetime': 'Date'}, inplace=True)
     print(df.head())
 
-    # Reverse the order of the dataframe - comment this out if it flips your chart
-    df = df[::-1]
-    df.index = df.index[::-1]
 
     # Trim off the unnecessary bit of the minute timeframe data - can be unnecessary
     # depending on where you source your data
