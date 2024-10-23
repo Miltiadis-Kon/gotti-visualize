@@ -12,4 +12,5 @@ pydrive
 python-dotenv
 scipy
 MetaTrader5
-alpaca_trade_api
+alpaca-py
+backtrader
