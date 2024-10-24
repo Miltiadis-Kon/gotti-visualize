@@ -46,12 +46,12 @@ def rank():
 
 class LongTrendHighMomentum(Strategy):
     
-    #Define variables TODO: MAKE THEM DYNAMIC
-    MIN_VOLUME = 50000000
-    LAST_DAYS = 20
-    stock  = Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK)
-    total_positions =0 
-    
+    parameters = {
+        "MIN_VOLUME": 50000000,
+        "LAST_DAYS": 20,
+        "stock": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
+    }
+        
     def initialize(self):
         self.sleeptime = "1D" # Execute strategy every day once
 
@@ -60,15 +60,15 @@ class LongTrendHighMomentum(Strategy):
         Average daily dollar volume greater than $50 million over the last twenty days.
         Minimum price $5.00.
         """
-        ticker_bars = self.get_historical_prices(self.stock.symbol,self.LAST_DAYS,"day").df
+        ticker_bars = self.get_historical_prices(self.parameters["stock"],self.parameters["LAST_DAYS"],"day").df
         if ticker_bars is None:
             print("No data found! Please consider changing the ticker symbol.")
             return False
-        if ticker_bars["volume"].mean() < self.MIN_VOLUME: # Average daily dollar volume greater than $50 million
+        if ticker_bars["volume"].mean() < self.parameters["MIN_VOLUME"]: # Average daily dollar volume greater than $50 million
             return False
         if ticker_bars["close"].min() < 5: # Minimum price $5.00.
             return False
-      #  print(f"{self.stock} meets the minimum requirements to be traded using the Long Trend High Momentum strategy.")
+      #  print(f"{self.parameters["stock"]} meets the minimum requirements to be traded using the Long Trend High Momentum strategy.")
         return True
 
     def check_ta(self):
@@ -77,7 +77,7 @@ class LongTrendHighMomentum(Strategy):
         This indicates a trend in the overall index.
         The close of the 25-day simple moving average is above the close of the 50-day simple moving average.
         """
-        ticker_bars = self.get_historical_prices(self.stock.symbol,50,"day").df
+        ticker_bars = self.get_historical_prices(self.parameters["stock"],50,"day").df
         spy = self.get_historical_prices("SPY",100,"day").df
         if spy is None:
            # print("No data found! Please consider changing the ticker symbol.")
@@ -92,7 +92,7 @@ class LongTrendHighMomentum(Strategy):
             return False
         if sma_25.iloc[-1] < sma_50.iloc[-1]: # The close of the 25-day simple moving average is above the close of the 50-day simple moving average.
             return False
-      #  print(f"{self.stock} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
+      #  print(f"{self.parameters["stock"]} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
         return True
         
     def stop_loss(self):
@@ -100,7 +100,7 @@ class LongTrendHighMomentum(Strategy):
         The day after entering the trade, place a stop-loss below the execution price of
         five times the average true range (ATR) of the last twenty days.
         """
-        ticker_bars = self.get_historical_prices(self.stock.symbol,self.LAST_DAYS,"day").df
+        ticker_bars = self.get_historical_prices(self.parameters["stock"],self.parameters["LAST_DAYS"],"day").df
        # return 5*(ta.atr(ticker_bars["high"],ticker_bars["low"],ticker_bars["close"],length=20).iloc[-1])
         return 100
 
@@ -114,7 +114,7 @@ class LongTrendHighMomentum(Strategy):
         2 percent risk and 10 percent maximum percentage size, with a maximum of ten positions.
         """
         #TODO FIX THIS
-        # if len(self.get_position(self.stock.symbol)) > 10:
+        # if len(self.get_position(self.parameters["stock"])) > 10:
         #     return 0
         size = 0.02 * self.cash # 2 percent risk 
         return size 
@@ -122,28 +122,31 @@ class LongTrendHighMomentum(Strategy):
     def on_trading_iteration(self):
         # If all conditions are met, place an order 
         # TO BE PERFORMED ONCE EVERY DAY ON MARKET OPEN
-        if not (self.check_if_tradeable() and self.check_ta()):
-            return
+#        if not (self.check_if_tradeable() and self.check_ta()):
+#            return
                 
        # order_size = self.position_sizing()
         order_size = 1
         if order_size == 0:
            # print("Position size is 0. No order will be placed.")
             return
-        stop_loss = self.stop_loss()
-        my_take_profit_price = self.get_historical_prices(self.stock.symbol,1,"day").df["close"].iloc[-1] * 1.25
-        bars = self.get_historical_prices(self.stock.symbol,20,"day").df
+        
+        my_take_profit_price = self.get_historical_prices(self.parameters["stock"],1,"day").df["close"].iloc[-1] * 1.25
+        
+        bars = self.get_historical_prices(self.parameters["stock"],20,"day").df
         my_stop_loss_price = ta.atr(bars["high"],bars["low"],bars["close"],length=20).iloc[-1] * 5
+        
+        
         # Bypass the negative cash issue in backtesting
         if self.is_backtesting:
             # Place order only if i have enough cash
-            if self.cash < order_size*self.get_historical_prices(self.stock.symbol,1,"day").df["close"].iloc[-1]:
+            if self.cash < order_size*self.get_historical_prices(self.parameters["stock"],1,"day").df["close"].iloc[-1]:
                 return
         
-        print(f"{self.stock} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
+        print(f"{self.parameters["stock"]} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
         # Place an oco order
         order = self.create_order(
-            asset=self.stock,
+            asset=self.parameters["stock"],
             quantity=order_size,
             side="buy",
             take_profit_price=my_take_profit_price,
@@ -152,12 +155,16 @@ class LongTrendHighMomentum(Strategy):
             type="bracket",
             )
         self.submit_order(order)
-       # print(f"Order placed for {self.stock} with a stop loss of {stop_loss}.")
+       # print(f"Order placed for {self.parameters["stock"]} with a stop loss of {stop_loss}.")
 
 def run_live():
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
-        strategy = LongTrendHighMomentum(broker=broker)
+        strategy = LongTrendHighMomentum(broker=broker,
+                                         parameters={"stock": Asset(symbol="NIO",
+                                                                    asset_type=Asset.AssetType.STOCK)
+                                                     }
+                                        )
 
         # Run the strategy live
         trader.add_strategy(strategy)
@@ -167,13 +174,17 @@ def run_backtest():
         # Define parameters
         backtesting_start = datetime(2023, 10, 23)
         backtesting_end = datetime(2024, 10, 23)
-        budget = 1000
-        # Run the backtest
+        budget = 10000
+        # Run the backtest    
         LongTrendHighMomentum.backtest(
-            YahooDataBacktesting, backtesting_start, backtesting_end, budget=budget
+            YahooDataBacktesting,
+            backtesting_start,
+            backtesting_end,
+            budget=budget,
+            parameters={"stock": Asset(symbol="NIO", asset_type=Asset.AssetType.STOCK)}
         )
 
 
 if __name__ == "__main__":
-    run_backtest()
-    #run_live()
+    #run_backtest()
+    run_live()
