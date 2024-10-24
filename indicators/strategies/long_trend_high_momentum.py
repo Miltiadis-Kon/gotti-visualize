@@ -25,10 +25,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+apikey = os.getenv("APCA_API_KEY_PAPER")
+apisecret = os.getenv("APCA_API_SECRET_KEY_PAPER")
 
 ALPACA_CONFIG = {
-    "API_KEY": os.getenv("APCA_API_KEY_PAPER"),
-    "API_SECRET": os.getenv("APCA_API_SECRET_KEY_PAPER"),
+    "API_KEY":apikey,
+    "API_SECRET": apisecret,
     "PAPER": True,  # Set to True for paper trading, False for live trading
 }
 
@@ -99,7 +101,8 @@ class LongTrendHighMomentum(Strategy):
         five times the average true range (ATR) of the last twenty days.
         """
         ticker_bars = self.get_historical_prices(self.stock.symbol,self.LAST_DAYS,"day").df
-        return 5*(ta.atr(ticker_bars["high"],ticker_bars["low"],ticker_bars["close"],length=20).iloc[-1])
+       # return 5*(ta.atr(ticker_bars["high"],ticker_bars["low"],ticker_bars["close"],length=20).iloc[-1])
+        return 100
 
     def profit_taking(self):
         """
@@ -121,26 +124,35 @@ class LongTrendHighMomentum(Strategy):
         # TO BE PERFORMED ONCE EVERY DAY ON MARKET OPEN
         if not (self.check_if_tradeable() and self.check_ta()):
             return
-        print(f"{self.stock} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
-        
-     # TODO: FIX ORDER SIZE AND ALSO FIX THAT I CAN BUY 124 POSITIONS OF APPL WITH OLNY 1000$ ??
-        
-        
+                
        # order_size = self.position_sizing()
         order_size = 1
         if order_size == 0:
            # print("Position size is 0. No order will be placed.")
             return
         stop_loss = self.stop_loss()
-        order = self.create_order(self.stock.symbol,order_size,
-                                  "buy", # Buy order
-                                  stop_loss_price=stop_loss, # Stop loss of 5 times the ATR
-                                  trail_percent=0.25 #Trailing stop of 25 percent 
-                                  )
+        my_take_profit_price = self.get_historical_prices(self.stock.symbol,1,"day").df["close"].iloc[-1] * 1.25
+        bars = self.get_historical_prices(self.stock.symbol,20,"day").df
+        my_stop_loss_price = ta.atr(bars["high"],bars["low"],bars["close"],length=20).iloc[-1] * 5
+        # Bypass the negative cash issue in backtesting
+        if self.is_backtesting:
+            # Place order only if i have enough cash
+            if self.cash < order_size*self.get_historical_prices(self.stock.symbol,1,"day").df["close"].iloc[-1]:
+                return
+        
+        print(f"{self.stock} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
+        # Place an oco order
+        order = self.create_order(
+            asset=self.stock,
+            quantity=order_size,
+            side="buy",
+            take_profit_price=my_take_profit_price,
+            stop_loss_price=my_stop_loss_price,
+            position_filled=True,
+            type="bracket",
+            )
         self.submit_order(order)
        # print(f"Order placed for {self.stock} with a stop loss of {stop_loss}.")
-        print(f"Current positions: {self.total_positions}")
-        self.total_positions += 1
 
 def run_live():
         trader = Trader()
@@ -155,7 +167,7 @@ def run_backtest():
         # Define parameters
         backtesting_start = datetime(2023, 10, 23)
         backtesting_end = datetime(2024, 10, 23)
-        budget = 100
+        budget = 1000
         # Run the backtest
         LongTrendHighMomentum.backtest(
             YahooDataBacktesting, backtesting_start, backtesting_end, budget=budget
@@ -164,4 +176,4 @@ def run_backtest():
 
 if __name__ == "__main__":
     run_backtest()
-    #LongTrendHighMomentum.run_live()
+    #run_live()

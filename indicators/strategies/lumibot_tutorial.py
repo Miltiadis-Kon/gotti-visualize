@@ -9,12 +9,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+apikey = os.getenv("APCA_API_KEY_PAPER")
+apisecret = os.getenv("APCA_API_SECRET_KEY_PAPER")
 
 ALPACA_CONFIG = {
-     "API_KEY": os.getenv("APCA_API_KEY_PAPER"),
-     "API_SECRET": os.getenv("APCA_API_SECRET_KEY_PAPER"),
-     "PAPER": True  # Set to True for paper trading, False for live trading
- }
+    "API_KEY":apikey,
+    "API_SECRET": apisecret,
+    "PAPER": True,  # Set to True for paper trading, False for live trading
+}
 
 # A simple strategy that buys AAPL on the first day and holds it
 class MyStrategy(Strategy):
@@ -24,7 +26,7 @@ class MyStrategy(Strategy):
     def on_trading_iteration(self):
         if self.first_iteration:
             quantity = 1
-            order = self.create_order("BTC/USD", quantity, "buy")
+            order = self.create_order("AAPL", quantity, "buy")
             self.submit_order(order)
 
 
