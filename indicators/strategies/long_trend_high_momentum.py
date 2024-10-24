@@ -1,91 +1,167 @@
-'''
+"""
 System 1: Long Trend High Momentum
 To be in trending stocks that have big momentum.
 This gets you into the high-fliers, the popular stocks, when the market is an uptrend.
 We only want to trade when the market sentiment is in our favor and we are in very liquid stocks.
-I like a lot of volume for long-term positions, because the volume may diminish over time and you want to have a cushion so you can always get out with good liquidity.
+I like a lot of volume for long-term positions, because the volume may diminish over time
+and you want to have a cushion so you can always get out with good liquidity.
 In this system I want the trend of the stock to be up in a very simple way. 
  
 From the book : Automated Stock Trading Systems by Lawrence Bensdorp
-'''
+"""
 
 import pandas_ta as ta
 import pandas as pd
+from datetime import datetime
+from lumibot.backtesting import YahooDataBacktesting
+from lumibot.strategies import Strategy
+from lumibot.brokers import Alpaca
+from lumibot.strategies.strategy import Strategy
+from lumibot.entities import Asset
+from lumibot.traders import Trader
+import os
+from dotenv import load_dotenv
 
 
-def format_date(date):
-    '''
-    Formats the date to the correct format
-    :param date: type = string, description = Date string
-    '''
-    return date.strftime('%Y-%m-%d')
+load_dotenv()
 
 
-def filters(ticker_data, end_date):
-    '''
-    Average daily dollar volume greater than $50 million over the last twenty days.
-    Minimum price $5.00.
-    :param data: type = Dataframe, description = Ticker data
-    :param end_date: type = string, description = Start date of filter 
-    '''
-    # Minimum price $5.00.
-    if ticker_data['close'] < 5:
-        return False
-    
-    end_date = pd.to_datetime(end_date)
-    end_date_20 = end_date - pd.DateOffset(days=20)
-    
-    # Average daily dollar volume greater than $50 million over the last twenty days.
-    df = ticker_data.loc[end_date_20:end_date] # Get the last 20 days as a DF
-    avg_volume = df['volume'].mean() # Get mean value of volume
-    if avg_volume < 50000000: # If less than 50 mil
-        return False
-    return True
-    
-    
-#TODO: Migrate rank on screener
+ALPACA_CONFIG = {
+    "API_KEY": os.getenv("APCA_API_KEY_PAPER"),
+    "API_SECRET": os.getenv("APCA_API_SECRET_KEY_PAPER"),
+    "PAPER": True,  # Set to True for paper trading, False for live trading
+}
+
+
+# TODO: Migrate rank on screener
 def rank():
-    '''
+    """
     In case we have more setups than our position sizing allows,
     we rank by the highest rate of change over the last 200 trading days.
-    This means the highest percentage price increase over the last 200 trading days. 
-    '''
+    This means the highest percentage price increase over the last 200 trading days.
+    """
     pass
 
-def setup(spy_data,ticker_data,end_date):
-    '''
-    Close of the SPY is above the 100-day simple moving average (SMA).
-    This indicates a trend in the overall index.
-    The close of the 25-day simple moving average is above the close of the 50-day simple moving average.
-    '''
-
-def entry():
-    '''
-    Next day market order on open.
-    '''
-
-def stop_loss():
-    '''
-    The day after entering the trade, place a stop-loss below the execution price of five times the average true range (ATR) of the last twenty days.
-    '''
-
-def reentry():
-    '''
-    If stopped out, reenter the next day if all entry conditions apply again.
-    '''
+class LongTrendHighMomentum(Strategy):
     
-def profit_protection():
-    '''
-    A trailing stop of 25 percent. This is in addition to the initial stop-loss.
-    Eventually, as the stock rises, the trailing stop will move up above the stop-loss price.
-    '''
-
-def profit_taking():
-    '''
-    No profit target; the goal is to ride this as high as it will go.
-    '''
+    #Define variables TODO: MAKE THEM DYNAMIC
+    MIN_VOLUME = 50000000
+    LAST_DAYS = 20
+    stock  = Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK)
+    total_positions =0 
     
-def position_sizing():
-    '''
-    2 percent risk and 10 percent maximum percentage size, with a maximum of ten positions.
-    '''
+    def initialize(self):
+        self.sleeptime = "1D" # Execute strategy every day once
+
+    def check_if_tradeable(self):
+        """
+        Average daily dollar volume greater than $50 million over the last twenty days.
+        Minimum price $5.00.
+        """
+        ticker_bars = self.get_historical_prices(self.stock.symbol,self.LAST_DAYS,"day").df
+        if ticker_bars is None:
+            print("No data found! Please consider changing the ticker symbol.")
+            return False
+        if ticker_bars["volume"].mean() < self.MIN_VOLUME: # Average daily dollar volume greater than $50 million
+            return False
+        if ticker_bars["close"].min() < 5: # Minimum price $5.00.
+            return False
+      #  print(f"{self.stock} meets the minimum requirements to be traded using the Long Trend High Momentum strategy.")
+        return True
+
+    def check_ta(self):
+        """
+        Close of the SPY is above the 100-day simple moving average (SMA).
+        This indicates a trend in the overall index.
+        The close of the 25-day simple moving average is above the close of the 50-day simple moving average.
+        """
+        ticker_bars = self.get_historical_prices(self.stock.symbol,50,"day").df
+        spy = self.get_historical_prices("SPY",100,"day").df
+        if spy is None:
+           # print("No data found! Please consider changing the ticker symbol.")
+            return False
+        sma_100 = ta.sma(spy["close"], length=100)
+        if spy["close"].iloc[-1] < sma_100.iloc[-1]: # Close of the SPY is above the 100-day simple moving average (SMA).
+            return False
+        sma_25 = ta.sma(ticker_bars["close"], length=25)
+        sma_50 = ta.sma(ticker_bars["close"], length=50)
+        if sma_25 is None or sma_50 is None:
+            #print("No data found! Please consider changing the ticker symbol.")
+            return False
+        if sma_25.iloc[-1] < sma_50.iloc[-1]: # The close of the 25-day simple moving average is above the close of the 50-day simple moving average.
+            return False
+      #  print(f"{self.stock} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
+        return True
+        
+    def stop_loss(self):
+        """
+        The day after entering the trade, place a stop-loss below the execution price of
+        five times the average true range (ATR) of the last twenty days.
+        """
+        ticker_bars = self.get_historical_prices(self.stock.symbol,self.LAST_DAYS,"day").df
+        return 5*(ta.atr(ticker_bars["high"],ticker_bars["low"],ticker_bars["close"],length=20).iloc[-1])
+
+    def profit_taking(self):
+        """
+        No profit target; the goal is to ride this as high as it will go.
+        """
+
+    def position_sizing(self):
+        """
+        2 percent risk and 10 percent maximum percentage size, with a maximum of ten positions.
+        """
+        #TODO FIX THIS
+        # if len(self.get_position(self.stock.symbol)) > 10:
+        #     return 0
+        size = 0.02 * self.cash # 2 percent risk 
+        return size 
+    
+    def on_trading_iteration(self):
+        # If all conditions are met, place an order 
+        # TO BE PERFORMED ONCE EVERY DAY ON MARKET OPEN
+        if not (self.check_if_tradeable() and self.check_ta()):
+            return
+        print(f"{self.stock} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
+        
+     # TODO: FIX ORDER SIZE AND ALSO FIX THAT I CAN BUY 124 POSITIONS OF APPL WITH OLNY 1000$ ??
+        
+        
+       # order_size = self.position_sizing()
+        order_size = 1
+        if order_size == 0:
+           # print("Position size is 0. No order will be placed.")
+            return
+        stop_loss = self.stop_loss()
+        order = self.create_order(self.stock.symbol,order_size,
+                                  "buy", # Buy order
+                                  stop_loss_price=stop_loss, # Stop loss of 5 times the ATR
+                                  trail_percent=0.25 #Trailing stop of 25 percent 
+                                  )
+        self.submit_order(order)
+       # print(f"Order placed for {self.stock} with a stop loss of {stop_loss}.")
+        print(f"Current positions: {self.total_positions}")
+        self.total_positions += 1
+
+def run_live():
+        trader = Trader()
+        broker = Alpaca(ALPACA_CONFIG)
+        strategy = LongTrendHighMomentum(broker=broker)
+
+        # Run the strategy live
+        trader.add_strategy(strategy)
+        trader.run_all()
+
+def run_backtest():
+        # Define parameters
+        backtesting_start = datetime(2023, 10, 23)
+        backtesting_end = datetime(2024, 10, 23)
+        budget = 100
+        # Run the backtest
+        LongTrendHighMomentum.backtest(
+            YahooDataBacktesting, backtesting_start, backtesting_end, budget=budget
+        )
+
+
+if __name__ == "__main__":
+    run_backtest()
+    #LongTrendHighMomentum.run_live()

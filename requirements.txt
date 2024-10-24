@@ -11,6 +11,5 @@ dash
 pydrive
 python-dotenv
 scipy
-MetaTrader5
 alpaca-py
-backtrader
+lumibot
