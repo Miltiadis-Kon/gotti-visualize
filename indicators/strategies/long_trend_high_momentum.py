@@ -1,13 +1,13 @@
 """
 System 1: Long Trend High Momentum
-To be in trending stocks that have big momentum.
-This gets you into the high-fliers, the popular stocks, when the market is an uptrend.
-We only want to trade when the market sentiment is in our favor and we are in very liquid stocks.
+To be in trending STOCKs that have big momentum.
+This gets you into the high-fliers, the popular STOCKs, when the market is an uptrend.
+We only want to trade when the market sentiment is in our favor and we are in very liquid STOCKs.
 I like a lot of volume for long-term positions, because the volume may diminish over time
 and you want to have a cushion so you can always get out with good liquidity.
-In this system I want the trend of the stock to be up in a very simple way. 
+In this system I want the trend of the STOCK to be up in a very simple way. 
  
-From the book : Automated Stock Trading Systems by Lawrence Bensdorp
+From the book : Automated STOCK Trading Systems by Lawrence Bensdorp
 """
 
 import pandas_ta as ta
@@ -50,10 +50,12 @@ def rank():
 class LongTrendHighMomentum(Strategy):
     
     parameters = {
-        "MIN_VOLUME": 50000000,
-        "LAST_DAYS": 20,
-        "SMA_DAYS":50,
-        "stock": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
+        "AvgDailyVolume": 50000000,
+        "SmaLength":50,
+        "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
+        "TrailStopLoss" : False, # True if you want to use a trail stop with no tp,
+                              #False if you want to use a 2:1 tp:sl ratio
+        "RiskRewardRatio" : 2 # Risk Reward Ratio for the trade
     }
         
     def initialize(self):
@@ -61,7 +63,7 @@ class LongTrendHighMomentum(Strategy):
         
     def before_market_opens(self):
         # Get the data once before market opens to not waste time
-        self.ticker_bars = self.get_historical_prices(self.parameters["stock"],self.parameters["SMA_DAYS"],"day").df
+        self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"],self.parameters["SmaLength"],"day").df
         self.spy_bars = self.get_historical_prices("SPY",100,"day").df
 
         return super().before_market_opens()
@@ -75,11 +77,11 @@ class LongTrendHighMomentum(Strategy):
         if bars is None:
             print("No data found! Please consider changing the ticker symbol.")
             return False
-        if bars["volume"].mean() < self.parameters["MIN_VOLUME"]: # Average daily dollar volume greater than $50 million
+        if bars["volume"].mean() < self.parameters["AvgDailyVolume"]: # Average daily dollar volume greater than $50 million
             return False
         if bars["close"].min() < 5: # Minimum price $5.00.
             return False
-      #  print(f"{self.parameters["stock"]} meets the minimum requirements to be traded using the Long Trend High Momentum strategy.")
+      #  print(f"{self.parameters["Ticker"]} meets the minimum requirements to be traded using the Long Trend High Momentum strategy.")
         return True
 
     def check_ta(self):
@@ -101,7 +103,7 @@ class LongTrendHighMomentum(Strategy):
             return False
         if sma_25.iloc[-1] < sma_50.iloc[-1]: # The close of the 25-day simple moving average is above the close of the 50-day simple moving average.
             return False
-      #  print(f"{self.parameters["stock"]} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
+      #  print(f"{self.parameters["Ticker"]} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
         return True
 
 
@@ -135,20 +137,32 @@ class LongTrendHighMomentum(Strategy):
         bars = self.ticker_bars.iloc[-20:]
         atr = (ta.atr(bars["high"],bars["low"],bars["close"]).iloc[-1] * 5)
         sl = bars["close"].iloc[-1] - atr
-        tp = bars["close"].iloc[-1] + atr * 2
+        tp = bars["close"].iloc[-1] + atr * self.parameters["RiskRewardRatio"]
 
               
-        print(f"{self.parameters["stock"]} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
+#       print(f"{self.parameters["Ticker"]} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
         # Place an oco order
-        order = self.create_order(
-            asset=self.parameters["stock"],
-            quantity=order_size,
-            side="buy",
-            take_profit_price=tp,
-            stop_loss_price=sl,
-            position_filled=True,
-            type="bracket",
-            )
+        if self.parameters["TrailStopLoss"] :
+            order = self.create_order(
+                asset=self.parameters["Ticker"],
+                quantity=order_size,
+                side="buy",
+                stop_loss_price=sl,
+                trail_percent=0.25,
+                position_filled=True,
+                type="bracket",
+                time_in_force="gtc")
+        else:
+            order = self.create_order(
+                asset=self.parameters["Ticker"],
+                quantity=order_size,
+                side="buy",
+                take_profit_price=tp,
+                stop_loss_price=sl,
+                position_filled=True,
+                type="bracket",
+                time_in_force="gtc")
+            
         self.submit_order(order)
        
     #   self.plot(tp,sl, self.ticker_bars.index[-1])
@@ -159,7 +173,7 @@ def run_live():
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
         strategy = LongTrendHighMomentum(broker=broker,
-                                         parameters={"stock": Asset(symbol="NIO",
+                                         parameters={"Ticker": Asset(symbol="NIO",
                                                                     asset_type=Asset.AssetType.STOCK)
                                                      }
                                         )
@@ -179,7 +193,7 @@ def run_backtest():
             backtesting_start,
             backtesting_end,
             budget=budget,
-            parameters={"stock": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK)}
+            parameters={"Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK)}
         )
 
 
