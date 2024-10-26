@@ -105,23 +105,6 @@ class LongTrendHighMomentum(Strategy):
             return False
       #  print(f"{self.parameters["Ticker"]} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
         return True
-
-
-    def plot(self,tp,sl,date):
-        
-        fig = go.Figure(data=[go.Candlestick(x=self.ticker_bars.index,
-                open=self.ticker_bars["open"],
-                high=self.ticker_bars["high"],
-                low=self.ticker_bars["low"],
-                close=self.ticker_bars["close"])])
-        fig.add_trace(go.Scatter(x=self.ticker_bars.index, y=ta.sma(self.ticker_bars["close"], length=50), mode='lines', name='50 Day SMA'))
-        fig.add_trace(go.Scatter(x=self.ticker_bars.index, y=ta.sma(self.ticker_bars["close"], length=25), mode='lines', name='25 Day SMA'))
-        fig.add_trace(go.Scatter(x=self.ticker_bars.index, y=ta.atr(self.ticker_bars["high"],self.ticker_bars["low"],self.ticker_bars["close"],length=20), mode='lines', name='ATR'))
-    
-        fig.add_trace(go.Scatter(x=[date,date], y=[sl,sl], mode='lines', name='Stop Loss'))
-        fig.add_trace(go.Scatter(x=[date,date], y=[tp,tp], mode='lines', name='Take Profit'))
-        fig.show()
-        
     
     def on_trading_iteration(self):
 
@@ -164,9 +147,7 @@ class LongTrendHighMomentum(Strategy):
                 time_in_force="gtc")
             
         self.submit_order(order)
-       
-    #   self.plot(tp,sl, self.ticker_bars.index[-1])
-       
+              
        
 
 def run_live():
