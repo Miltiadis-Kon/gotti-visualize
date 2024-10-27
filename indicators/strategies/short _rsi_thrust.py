@@ -6,6 +6,7 @@ This is the perfect add-on to an LTTF system, to capture those downward moves.
 From the book : Automated STOCK Trading Systems by Lawrence Bensdorp
 """
 
+import webbrowser
 import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
@@ -17,6 +18,10 @@ from lumibot.entities import Asset, Order
 from lumibot.traders import Trader
 import os
 from dotenv import load_dotenv
+import plotly.graph_objects as go
+
+
+
 
 load_dotenv()
 
@@ -119,6 +124,44 @@ class ShortRSIThrust(Strategy):
         return ta.atr(bars['high'], bars['low'], bars['close'], length=self.atr_period).iloc[-1]
 
 
+    def plot(self,order,price,date):
+        """Plot the strategy"""
+        expiration = date + timedelta(days=2)
+        fig = go.Figure(data=[go.Candlestick(x=self.ticker_bars.index,
+                open=self.ticker_bars['open'],
+                high=self.ticker_bars['high'],
+                low=self.ticker_bars['low'],
+                close=self.ticker_bars['close'])])
+        
+        fig.add_trace(go.Scatter(x=[date,expiration],
+                                 y=[price,price],
+                                 mode="lines",
+                                 marker=dict(size=[10],color="blue"),
+                                 name="Entry Price"))
+        
+        fig.add_trace(go.Scatter(x=[date,expiration],
+                                 y=[order.stop_loss_price,price],
+                                 mode="lines",
+                                 marker=dict(size=[10],color="red"),
+                                 name="Stop Loss"))
+        
+        fig.add_trace(go.Scatter(x=[date,expiration],
+                                    y=[order.take_profit_price,order.take_profit_price],
+                                    mode="lines",
+                                    marker=dict(size=[10],color="green"),
+                                    name="Take Profit"))
+        
+        fig.update_layout(title=f"{self.parameters['Ticker']} - Short RSI Thrust",
+                            xaxis_title="Date",
+                            yaxis_title="Price",
+                            template="plotly_dark")
+        
+        fig.write_html(f".\logs\charts\Chart {order.identifier}.html")        
+        webbrowser.open(f".\logs\charts\Chart {order.identifier}.html")
+
+        
+        
+
     def on_trading_iteration(self):
         '''
         Entry : Next day, sell short 4 percent above the previous closing price.
@@ -145,6 +188,9 @@ class ShortRSIThrust(Strategy):
                 sl = entry_price - self.get_atr() * self.atr_multiplier #TODO: 3 times ATR of the last ten days above the execution price
                 # calculate position size
                 position_size = self.position_sizing() 
+                
+                if position_size == 0:
+                    return
                 # place order
                 order = self.create_order(
                     asset=self.parameters["Ticker"],
@@ -158,16 +204,16 @@ class ShortRSIThrust(Strategy):
                     good_till_date=self.get_datetime() + timedelta(days=2),
                 )
                 
-                print(f"\nPlacing order: {order.side} {position_size} {order.asset} at {entry_price} on {self.get_datetime()}")
-                
-                order = self.submit_order(order)   
+                print(f"\nPlacing order: {order.side} {position_size} {order.asset} at {entry_price} on {self.get_datetime()}")            
+                order = self.submit_order(order)
+                self.plot(order,entry_price,self.get_datetime())
     
     def on_filled_order(self, position, order, price, quantity,multiplier) :
         """Update position data after order is filled"""
         if order.asset == self.parameters["Ticker"]: # Only update data for the traded asset    
             # Print order details
             print(f"Order filled: {order.side} {quantity} {order.asset} at {price} on {self.get_datetime()}")  
-            self.positions_data[order.identifier] = {"entry_date": self.get_datetime()} # Update entry date                                          }
+            self.positions_data[order.identifier] = {"entry_date": self.get_datetime()} # Update entry date     
         return super().on_filled_order(position, order, price, quantity, multiplier)
         
 

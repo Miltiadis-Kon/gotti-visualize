@@ -10,9 +10,10 @@ In this system I want the trend of the STOCK to be up in a very simple way.
 From the book : Automated STOCK Trading Systems by Lawrence Bensdorp
 """
 
+import webbrowser
 import pandas_ta as ta
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from lumibot.backtesting import YahooDataBacktesting
 from lumibot.strategies import Strategy
 from lumibot.brokers import Alpaca
@@ -61,6 +62,11 @@ class LongTrendHighMomentum(Strategy):
     def initialize(self):
         self.sleeptime = "1D" # Execute strategy every day once
         
+        
+        if self.is_backtesting():
+            self.initialize_plot()
+            self.plots = []
+        
     def before_market_opens(self):
         # Get the data once before market opens to not waste time
         self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"],self.parameters["SmaLength"],"day").df
@@ -106,6 +112,60 @@ class LongTrendHighMomentum(Strategy):
       #  print(f"{self.parameters["Ticker"]} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
         return True
     
+    
+    
+    def schedule_plot(self,order,price,date):
+        """Schedule the plot to be executed after the order is filled"""
+        self.plots.append({"order": order, "price": price, "date": date})
+        current_date = self.get_datetime()
+        current_date_timestamp = pd.Timestamp(current_date - timedelta(days=60))
+        for plot in self.plots:
+        #    print (current_date_timestamp - plot["date"])
+            if (current_date_timestamp - plot["date"]).days > 0:
+                self.plot(plot["order"],plot["price"],plot["date"])
+                self.plots.remove(plot)
+                break        
+    
+    
+    def initialize_plot(self):
+        """Initialize the plot"""
+        self.fig = go.Figure(data=[go.Candlestick()])
+        self.fig.update_layout(title=f"{self.parameters['Ticker']} - Long Trend High Momentum Strategy",
+                            xaxis_title="Date",
+                            yaxis_title="Price",
+                            template="plotly_dark")
+    
+    
+    def plot(self,order,price,date):
+        """Plot the strategy"""
+        expiration = date + timedelta(days=90)
+        
+        self.fig = go.Figure(data=[go.Candlestick(x=self.total_bars.index,
+                                                    open=self.ticker_bars["open"],
+                                                    high=self.ticker_bars["high"],
+                                                    low=self.ticker_bars["low"],
+                                                    close=self.ticker_bars["close"])])
+        
+        
+        self.fig.add_trace(go.Scatter(x=[date,expiration],
+                                 y=[price,price],
+                                 mode="lines",
+                                 marker=dict(size=[10],color="blue"),
+                                 name="Entry Price"))
+        
+        self.fig.add_trace(go.Scatter(x=[date,expiration],
+                                 y=[order.stop_loss_price,price],
+                                 mode="lines",
+                                 marker=dict(size=[10],color="red"),
+                                 name="Stop Loss"))
+        
+        self.fig.add_trace(go.Scatter(x=[date,expiration],
+                                    y=[order.take_profit_price,order.take_profit_price],
+                                    mode="lines",
+                                    marker=dict(size=[10],color="green"),
+                                    name="Take Profit"))    
+    
+    
     def on_trading_iteration(self):
 
         if not (self.check_if_tradeable() and self.check_ta()):
@@ -146,8 +206,16 @@ class LongTrendHighMomentum(Strategy):
                 type="bracket",
                 time_in_force="gtc")
             
-        self.submit_order(order)
-              
+        
+        if self.is_backtesting(): 
+            self.schedule_plot(order,bars["close"].iloc[-1],bars.index[-1])  
+            self.submit_order(order)
+    
+    def on_strategy_end(self):
+        self.fig.write_html(f".\logs\charts\Chart.html")
+        webbrowser.open(f".\logs\charts\Chart.html")
+                
+        return super().on_strategy_end()       
        
 
 def run_live():
