@@ -56,14 +56,14 @@ class LongTrendHighMomentum(Strategy):
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
         "TrailStopLoss" : False, # True if you want to use a trail stop with no tp,
                               #False if you want to use a 2:1 tp:sl ratio
-        "RiskRewardRatio" : 2 # Risk Reward Ratio for the trade
+        "RiskRewardRatio" : 2, # Risk Reward Ratio for the trade
+        "Plot": True # True if you want to plot the trades, False if you don't want to plot the trades
     }
         
     def initialize(self):
         self.sleeptime = "1D" # Execute strategy every day once
-        
-        
-        if self.is_backtesting():
+        self.will_plot = self.parameters["Plot"]     
+        if self.is_backtesting and self.will_plot: # Initialize the plot
             self.initialize_plot()
             self.plots = []
         
@@ -124,12 +124,17 @@ class LongTrendHighMomentum(Strategy):
             if (current_date_timestamp - plot["date"]).days > 0:
                 self.plot(plot["order"],plot["price"],plot["date"])
                 self.plots.remove(plot)
+                
+                
+                
+                
                 break        
     
     
     def initialize_plot(self):
         """Initialize the plot"""
-        self.fig = go.Figure(data=[go.Candlestick()])
+        self.date = self.get_datetime()
+        self.fig = go.Figure()   
         self.fig.update_layout(title=f"{self.parameters['Ticker']} - Long Trend High Momentum Strategy",
                             xaxis_title="Date",
                             yaxis_title="Price",
@@ -139,13 +144,13 @@ class LongTrendHighMomentum(Strategy):
     def plot(self,order,price,date):
         """Plot the strategy"""
         expiration = date + timedelta(days=90)
-        
-        self.fig = go.Figure(data=[go.Candlestick(x=self.total_bars.index,
-                                                    open=self.ticker_bars["open"],
-                                                    high=self.ticker_bars["high"],
-                                                    low=self.ticker_bars["low"],
-                                                    close=self.ticker_bars["close"])])
-        
+        diff = abs(self.get_datetime() - self.date).days
+        data = self.get_historical_prices(self.parameters["Ticker"],diff,"day").df
+        self.fig = go.Figure(data=[go.Candlestick(x=data.index,
+                                                   open=data['open'],
+                                                   high=data['high'],
+                                                   low=data['low'],
+                                                   close=data['close'])])
         
         self.fig.add_trace(go.Scatter(x=[date,expiration],
                                  y=[price,price],
@@ -207,13 +212,14 @@ class LongTrendHighMomentum(Strategy):
                 time_in_force="gtc")
             
         
-        if self.is_backtesting(): 
+        if self.is_backtesting and self.will_plot: 
             self.schedule_plot(order,bars["close"].iloc[-1],bars.index[-1])  
             self.submit_order(order)
     
     def on_strategy_end(self):
-        self.fig.write_html(f".\logs\charts\Chart.html")
-        webbrowser.open(f".\logs\charts\Chart.html")
+        if self.will_plot:
+            self.fig.write_html(f".\logs\charts\Chart.html")
+            webbrowser.open(f".\logs\charts\Chart.html")
                 
         return super().on_strategy_end()       
        
