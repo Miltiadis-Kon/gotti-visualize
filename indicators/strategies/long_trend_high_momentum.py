@@ -122,28 +122,48 @@ class LongTrendHighMomentum(Strategy):
         for plot in self.plots:
         #    print (current_date_timestamp - plot["date"])
             if (current_date_timestamp - plot["date"]).days > 0:
-                self.plot(plot["order"],plot["price"],plot["date"])
-                self.plots.remove(plot)
+                self.plots.remove(plot)      
+                # Return a scatter list  
+                expiration = plot["date"] + timedelta(days=90)
                 
+                buy = go.Scatter(x=[plot["date"],expiration],
+                                 y=[plot["price"],plot["price"]],
+                                    mode="lines",
+                                    marker=dict(size=[10],color="blue"),
+                                    name="Entry Price")
                 
+                stop_loss = go.Scatter(x=[plot["date"],expiration],
+                                 y=[plot["order"].stop_loss_price,plot["price"]],
+                                    mode="lines",
+                                    marker=dict(size=[10],color="red"),
+                                    name="Stop Loss")
                 
+                take_profit = go.Scatter(x=[plot["date"],expiration],
+                                 y=[plot["order"].take_profit_price,plot["order"].take_profit_price],
+                                    mode="lines",
+                                    marker=dict(size=[10],color="green"),
+                                    name="Take Profit")
                 
+                scatter = [buy,stop_loss,take_profit]
+                self.scatters.append(scatter)                
                 break        
     
     
     def initialize_plot(self):
         """Initialize the plot"""
         self.date = self.get_datetime()
-        self.fig = go.Figure()   
+        self.fig = go.Figure()
+        
+        self.scatters = []
+        
         self.fig.update_layout(title=f"{self.parameters['Ticker']} - Long Trend High Momentum Strategy",
                             xaxis_title="Date",
                             yaxis_title="Price",
                             template="plotly_dark")
     
     
-    def plot(self,order,price,date):
+    def plot(self):
         """Plot the strategy"""
-        expiration = date + timedelta(days=90)
         diff = abs(self.get_datetime() - self.date).days
         data = self.get_historical_prices(self.parameters["Ticker"],diff,"day").df
         self.fig = go.Figure(data=[go.Candlestick(x=data.index,
@@ -151,25 +171,30 @@ class LongTrendHighMomentum(Strategy):
                                                    high=data['high'],
                                                    low=data['low'],
                                                    close=data['close'])])
+        for scatter in self.scatters:
+            self.fig.add_traces(scatter) 
+                # Create buttons to toggle scatter traces
+                
+        buttons = []
+        for i, scatter in enumerate(self.scatters):
+            buttons.append(dict(
+                label=f'Scatter {i+1}',
+                method='update',
+                args=[{'visible': [True] * (len(self.fig.data) - len(self.scatters)) + [False] * len(self.scatters)},
+                      {'title': f'Scatter {i+1}'}]
+            ))
+            buttons[-1]['args'][0]['visible'][len(self.fig.data) - len(self.scatters) + i] = True
+
+        # Add buttons to layout
+        self.fig.update_layout(
+            updatemenus=[dict(
+                type="buttons",
+                direction="down",
+                buttons=buttons,
+                showactive=True,
+            )]
+        )
         
-        self.fig.add_trace(go.Scatter(x=[date,expiration],
-                                 y=[price,price],
-                                 mode="lines",
-                                 marker=dict(size=[10],color="blue"),
-                                 name="Entry Price"))
-        
-        self.fig.add_trace(go.Scatter(x=[date,expiration],
-                                 y=[order.stop_loss_price,price],
-                                 mode="lines",
-                                 marker=dict(size=[10],color="red"),
-                                 name="Stop Loss"))
-        
-        self.fig.add_trace(go.Scatter(x=[date,expiration],
-                                    y=[order.take_profit_price,order.take_profit_price],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="green"),
-                                    name="Take Profit"))    
-    
     
     def on_trading_iteration(self):
 
@@ -218,6 +243,7 @@ class LongTrendHighMomentum(Strategy):
     
     def on_strategy_end(self):
         if self.will_plot:
+            self.plot()
             self.fig.write_html(f".\logs\charts\Chart.html")
             webbrowser.open(f".\logs\charts\Chart.html")
                 
