@@ -45,6 +45,7 @@ class LongMeanReversionSelloff(Strategy):
 
         if self.is_backtesting and self.will_plot: # Initialize the plot
             self.initialize_plot()
+            self.position_ctr = 0
             self.plots = []
     
     def before_market_opens(self):
@@ -55,49 +56,74 @@ class LongMeanReversionSelloff(Strategy):
         
         self.techincal = self.setup()
         
-        return super().before_market_opens()
     
+    
+    #TODO : this set up can not be traded once per day, but when parameters are met.
+    # However, I can not understand if a market order is placed, if the data are only for the day
+    # I will need to check this with the lumibot team
     def on_trading_iteration(self): 
-        
-        if not self.tradeable and not self.techincal:
-            return
-        
-        entry_price = self.get_entry_price()
-        
-        stop_loss = self.get_stop_loss(entry_price)
-        
-        take_profit = self.get_take_profit(entry_price)
-        
-        position_size = self.get_position_sizing()
-        
-        if position_size == 0:
-            return
-           
-        order = self.create_order(asset = self.parameters["Ticker"],
-                                  quantity=position_size,
-                                  limit_price=entry_price,
-                                  stop_loss_price=stop_loss,
-                                  take_profit_price=take_profit,
-                                  type="limit",
-                                  side="buy",
-                                  time_in_force="gtc"
-                                  )
-        
-        self.submit_order(order)
+        if self.tradeable and self.techincal:     
+            entry_price = self.get_entry_price()
+            position_size = self.get_position_sizing()
+            if position_size != 0:           
+                order = self.create_order(asset = self.parameters["Ticker"],
+                                        quantity=position_size,
+                                        limit_price=entry_price,
+                                        side="buy",
+                                        good_till_date=self.get_datetime() + timedelta(days=1)
+                                        )
+                self.submit_order(order)
+#               print(f"Order submitted: {order}. Date: {self.get_datetime()}")
                 
-        if self.is_backtesting and self.will_plot: 
-            self.schedule_plot(order,self.ticker_bars["close"].iloc[-1],self.ticker_bars.index[-1])  
+                
+        orders = self.get_orders()
+        for order in orders:
+#            print(f"{order}   Order status: {order.status} Good Until Date: {order.good_till_date}")
+            if order.side == "buy" and order.status == "new":
+                if self.get_datetime() > order.good_till_date:
+                    self.cancel_order(order)
+                    
+                        
+    def on_canceled_order(self, order):
+        
+        print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
+    
+        
+    
+    def on_filled_order(self, position, order, price, quantity, multiplier):
+        
+        # If the order is filled, we can print the order details
+    #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
+        if  order.side == "sell":
+            return
+        
+        take_profit = self.get_take_profit(price)
+        stop_loss = self.get_stop_loss(price)
+            
+        # Update order's take profit and stop loss prices
+        order2 = self.create_order(asset = self.parameters["Ticker"],
+                                    quantity=order.quantity,
+                                    take_profit_price=take_profit,
+                                    stop_loss_price= stop_loss,
+                                    side="sell",
+                                    time_in_force="gtc"
+                                    )
+        
+        
+        order.add_child_order(order2)
+    #    self.submit_order(order2)
 
-        return super().on_trading_iteration()
+        if self.is_backtesting and self.will_plot: 
+            self.schedule_plot(price,self.get_datetime(),stop_loss,take_profit) 
+            
+    
      
     def on_strategy_end(self):
         if self.will_plot:
             self.plot()
-            self.fig.write_html(f".\logs\charts\Chart.html")
-            webbrowser.open(f".\logs\charts\Chart.html")
-                
-        return super().on_strategy_end()
-    
+            self.fig.write_html(r".\logs\charts\Chart.html")
+            webbrowser.open(r".\logs\charts\Chart.html")
+                    
     ########################
     
     
@@ -112,12 +138,12 @@ class LongMeanReversionSelloff(Strategy):
         if self.ticker_bars["close"].iloc[-1] < 1:
             return False
           
-        shares = self.ticker_bars["close"].iloc[-50].mean() / self.ticker_bars["volume"].iloc[-50].mean() 
+        shares = self.ticker_bars["volume"].iloc[-50].mean() / self.ticker_bars["close"].iloc[-50].mean()
         if shares < self.parameters["AvgDailyShares"]:
             return False
         
-        atr = ta.atr(self.ticker_bars["high"].iloc[-50], self.ticker_bars["low"].iloc[-50], self.ticker_bars["close"].iloc[-50], length=10)
-        if atr.iloc[-1] < 0.05:
+        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
+        if atr is None or atr.iloc[-1] < 0.05:
             return False
         
         return True
@@ -172,14 +198,16 @@ class LongMeanReversionSelloff(Strategy):
     
     ##### PLOT FUNCTIONS #####
     
-    def schedule_plot(self,order,price,date):
+    def schedule_plot(self,price,date,stop_loss,take_profit):
         """Schedule the plot to be executed after the order is filled"""
-        self.plots.append({"order": order, "price": price, "date": date})
+        self.plots.append({"price": price, "date": date,"stop_loss":stop_loss,"take_profit":take_profit})
         current_date = self.get_datetime()
-        current_date_timestamp = pd.Timestamp(current_date - timedelta(days=60))
+#       current_date_timestamp = pd.Timestamp(current_date - timedelta(days=60))
+        current_date_timestamp = pd.Timestamp(current_date)
         for plot in self.plots:
         #    print (current_date_timestamp - plot["date"])
             if (current_date_timestamp - plot["date"]).days > 0:
+                self.position_ctr += 1
                 self.plots.remove(plot)      
                 # Return a scatter list  
                 expiration = plot["date"] + timedelta(days=90)
@@ -188,21 +216,21 @@ class LongMeanReversionSelloff(Strategy):
                                  y=[plot["price"],plot["price"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="blue"),
-                                    name= f"plot{plot['order'].identifier}"
+                                    name= f"Order {self.position_ctr}"
                                     )
                 
                 stop_loss = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["order"].stop_loss_price,plot["price"]],
+                                 y=[plot["stop_loss"],plot["stop_loss"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="red"),
-                                    name= f"plot{plot['order'].identifier}"
+                                    name= f"Order {self.position_ctr}"
                                     )
                 
                 take_profit = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["order"].take_profit_price,plot["order"].take_profit_price],
+                                 y=[plot["take_profit"],plot["take_profit"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="green"),
-                                    name= f"plot{plot['order'].identifier}"
+                                    name= f"Order {self.position_ctr}"
                                     )
                 
             #    scatter = [buy,stop_loss,take_profit]
