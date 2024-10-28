@@ -74,19 +74,18 @@ class LongMeanReversionSelloff(Strategy):
                                         )
                 self.submit_order(order)
 #               print(f"Order submitted: {order}. Date: {self.get_datetime()}")
-                
-                
+    
+    def after_market_closes(self):
+        # Cancel all open orders apart from stop loss/ take profit orders
         orders = self.get_orders()
         for order in orders:
-#            print(f"{order}   Order status: {order.status} Good Until Date: {order.good_till_date}")
-            if order.side == "buy" and order.status == "new":
-                if self.get_datetime() > order.good_till_date:
-                    self.cancel_order(order)
-                    
+            if order.status == "new" and order.side == "buy":
+                self.cancel_order(order)
                         
     def on_canceled_order(self, order):
         
-        print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
+#       print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
+        pass
     
         
     
@@ -211,6 +210,7 @@ class LongMeanReversionSelloff(Strategy):
                 self.plots.remove(plot)      
                 # Return a scatter list  
                 expiration = plot["date"] + timedelta(days=90)
+                
                 
                 buy = go.Scatter(x=[plot["date"],expiration],
                                  y=[plot["price"],plot["price"]],
