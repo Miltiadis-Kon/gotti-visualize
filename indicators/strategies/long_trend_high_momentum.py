@@ -62,7 +62,8 @@ class LongTrendHighMomentum(Strategy):
         
     def initialize(self):
         self.sleeptime = "1D" # Execute strategy every day once
-        self.will_plot = self.parameters["Plot"]     
+        self.will_plot = self.parameters["Plot"]
+        self.positions = 0 
         if self.is_backtesting and self.will_plot: # Initialize the plot
             self.initialize_plot()
             self.plots = []
@@ -112,7 +113,7 @@ class LongTrendHighMomentum(Strategy):
       #  print(f"{self.parameters["Ticker"]} meets the technical analysis requirements to be traded using the Long Trend High Momentum strategy.")
         return True
     
-    
+    ##### PLOT FUNCTIONS #####
     
     def schedule_plot(self,order,price,date):
         """Schedule the plot to be executed after the order is filled"""
@@ -147,8 +148,7 @@ class LongTrendHighMomentum(Strategy):
                 scatter = [buy,stop_loss,take_profit]
                 self.scatters.append(scatter)                
                 break        
-    
-    
+       
     def initialize_plot(self):
         """Initialize the plot"""
         self.date = self.get_datetime()
@@ -193,8 +193,13 @@ class LongTrendHighMomentum(Strategy):
                 buttons=buttons,
                 showactive=True,
             )]
-        )
-        
+        )      
+    
+    
+        ##### PLOT FUNCTIONS #####
+
+    ############################
+    
     
     def on_trading_iteration(self):
 
@@ -235,11 +240,11 @@ class LongTrendHighMomentum(Strategy):
                 position_filled=True,
                 type="bracket",
                 time_in_force="gtc")
-            
+                
+        self.submit_order(order)
         
         if self.is_backtesting and self.will_plot: 
             self.schedule_plot(order,bars["close"].iloc[-1],bars.index[-1])  
-            self.submit_order(order)
     
     def on_strategy_end(self):
         if self.will_plot:
@@ -247,8 +252,7 @@ class LongTrendHighMomentum(Strategy):
             self.fig.write_html(f".\logs\charts\Chart.html")
             webbrowser.open(f".\logs\charts\Chart.html")
                 
-        return super().on_strategy_end()       
-       
+        return super().on_strategy_end()  
 
 def run_live():
         trader = Trader()
