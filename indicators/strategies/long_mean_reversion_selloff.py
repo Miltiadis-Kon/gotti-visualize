@@ -56,12 +56,8 @@ class LongMeanReversionSelloff(Strategy):
         
         self.techincal = self.setup()
         
-    
-    
-    #TODO : this set up can not be traded once per day, but when parameters are met.
-    # However, I can not understand if a market order is placed, if the data are only for the day
-    # I will need to check this with the lumibot team
     def on_trading_iteration(self): 
+        
         if self.tradeable and self.techincal:     
             entry_price = self.get_entry_price()
             position_size = self.get_position_sizing()
@@ -187,7 +183,7 @@ class LongMeanReversionSelloff(Strategy):
         """
         2 percent risk and 10 percent maximum percent size
         """
-        return int((self.cash / self.ticker_bars["close"].iloc[-1]) * self.risk_percent)
+        return round((self.cash / self.ticker_bars["close"].iloc[-1]) * self.risk_percent)
 
     
     
@@ -320,7 +316,7 @@ def run_backtest():
         # Define parameters
         backtesting_start = datetime(2023, 10, 23)
         backtesting_end = datetime(2024, 10, 23)
-        budget = 10000
+        budget = 2000
         # Run the backtest    
         LongMeanReversionSelloff.backtest(
             YahooDataBacktesting,
