@@ -188,22 +188,27 @@ class LongMeanReversionSelloff(Strategy):
                                  y=[plot["price"],plot["price"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="blue"),
-                                    name="Entry Price")
+                                    name= f"plot{plot['order'].identifier}"
+                                    )
                 
                 stop_loss = go.Scatter(x=[plot["date"],expiration],
                                  y=[plot["order"].stop_loss_price,plot["price"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="red"),
-                                    name="Stop Loss")
+                                    name= f"plot{plot['order'].identifier}"
+                                    )
                 
                 take_profit = go.Scatter(x=[plot["date"],expiration],
                                  y=[plot["order"].take_profit_price,plot["order"].take_profit_price],
                                     mode="lines",
                                     marker=dict(size=[10],color="green"),
-                                    name="Take Profit")
+                                    name= f"plot{plot['order'].identifier}"
+                                    )
                 
-                scatter = [buy,stop_loss,take_profit]
-                self.scatters.append(scatter)                
+            #    scatter = [buy,stop_loss,take_profit]
+                self.scatters.append(buy)
+                self.scatters.append(stop_loss)
+                self.scatters.append(take_profit)               
                 break        
        
     def initialize_plot(self):
@@ -229,28 +234,39 @@ class LongMeanReversionSelloff(Strategy):
                                                    low=data['low'],
                                                    close=data['close'])])
         for scatter in self.scatters:
-            self.fig.add_traces(scatter) 
+            self.fig.add_traces(scatter)
                 # Create buttons to toggle scatter traces
-                
+        
         buttons = []
+        button_visibility = {}
         for i, scatter in enumerate(self.scatters):
-            buttons.append(dict(
-                label=f'Scatter {i+1}',
-                method='update',
-                args=[{'visible': [True] * (len(self.fig.data) - len(self.scatters)) + [False] * len(self.scatters)},
-                      {'title': f'Scatter {i+1}'}]
-            ))
-            buttons[-1]['args'][0]['visible'][len(self.fig.data) - len(self.scatters) + i] = True
-
-        # Add buttons to layout
+            scatter_name = scatter.name
+            if scatter_name not in button_visibility:
+                button_visibility[scatter_name] = [True] * (len(self.fig.data) - len(self.scatters)) + [False] * len(self.scatters)
+                button_visibility[scatter_name][len(self.fig.data) - len(self.scatters) + i] = True
+                button = dict(
+                    label=scatter_name,
+                    method="update",
+                    args=[{"visible": button_visibility[scatter_name]}]
+                )
+                buttons.append(button)
+            else:
+                button_visibility[scatter_name][len(self.fig.data) - len(self.scatters) + i] = True
+        
         self.fig.update_layout(
-            updatemenus=[dict(
-                type="buttons",
-                direction="down",
+        updatemenus=[
+            dict(
+                active=0,
                 buttons=buttons,
+                direction="down",
                 showactive=True,
-            )]
-        )      
+                x=0.17,
+                xanchor="left",
+                y=1.15,
+                yanchor="top"
+            )
+        ]
+    )
     
     
         ##### PLOT FUNCTIONS #####
