@@ -61,22 +61,17 @@ class TheCatastropheHedge(Strategy):
     def before_market_opens(self):
         
         self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"], 200, "day").df
-        
-        self.tradeable = self.filter()
-        
+                
         self.techincal = self.setup()
         
     def on_trading_iteration(self): 
         
-        if self.tradeable and self.techincal:     
-            entry_price = self.get_entry_price()
+        if self.techincal:     
             position_size = self.get_position_sizing()
             if position_size != 0:           
                 order = self.create_order(asset = self.parameters["Ticker"],
                                         quantity=position_size,
-                                        limit_price=entry_price,
                                         side="sell",
-                                        good_till_date=self.get_datetime() + timedelta(days=1)
                                         )
                 self.submit_order(order)
 #               print(f"Order submitted: {order}. Date: {self.get_datetime()}")
@@ -102,13 +97,11 @@ class TheCatastropheHedge(Strategy):
         if  order.side == "sell":
             return
         
-        take_profit = self.get_take_profit(price)
         stop_loss = self.get_stop_loss(price)
             
         # Update order's take profit and stop loss prices
         order2 = self.create_order(asset = self.parameters["Ticker"],
                                     quantity=order.quantity,
-                                    take_profit_price=take_profit,
                                     stop_loss_price= stop_loss,
                                     side="buy",
                                     time_in_force="gtc"
@@ -119,7 +112,7 @@ class TheCatastropheHedge(Strategy):
     #    self.submit_order(order2)
 
         if self.is_backtesting and self.will_plot: 
-            self.schedule_plot(price,self.get_datetime(),stop_loss,take_profit) 
+            self.schedule_plot(price,self.get_datetime(),stop_loss,None) 
             
     
      
@@ -133,83 +126,20 @@ class TheCatastropheHedge(Strategy):
     
     
     ##### TRADING FUNCTIONS #####
-    def filter(self):
-        """
-        Minimum price $5
-        Average dollar volume $10 million over the last fifty trading days.
-        """
-        if self.ticker_bars["close"].iloc[-1] < 5:
-            return False
-        
-        df_vol = self.calculate_dollar_volume(self.ticker_bars,window=50)
-               
-        if df_vol["avg_dollar_volume"].iloc[-1] < 10000000:
-            return False
-                
-        return True
         
     def setup(self):
         """
-        The price of the stock has increased at least 20 percent over the last six trading days.
-        Last two days had positive closes. 
-        These two indicators mean the stock is very popular;
-        there has been a lot of buying pressure.
+        The close of the SPY is the lowest close of the last fifty days
         """
-        if self.ticker_bars["close"].iloc[-1] < self.ticker_bars["close"].iloc[-2]:
+        spy_bars = self.get_historical_prices(Asset(symbol="SPY", asset_type=Asset.AssetType.STOCK), 50, "day").df
+
+        if spy_bars["close"].iloc[-1] == spy_bars["close"].min():
+            return True
+        else :
             return False
-        
-        if self.ticker_bars["close"].iloc[-2] < self.ticker_bars["close"].iloc[-3]:
-            return False
-        
-        if (self.ticker_bars["high"].iloc[-1] - self.ticker_bars["low"].iloc[-7]) < 0.2 * self.ticker_bars["low"].iloc[-7]:
-            return False
-        
-        return True
-    
-    def calculate_dollar_volume(self,df, price_column='close', volume_column='volume', window=20):
-        """
-        Calculate dollar volume and related metrics.
-        
-        Parameters:
-        -----------
-        df : pandas.DataFrame
-            DataFrame containing price and volume data
-        price_column : str, default 'close'
-            Name of the column containing price data
-        volume_column : str, default 'volume'
-            Name of the column containing volume data
-        window : int, default 20
-            Rolling window for average calculations
             
-        Returns:
-        --------
-        pandas.DataFrame
-            DataFrame with the original data plus volume metrics
-        """
-        # Create a copy of the dataframe
-        df_vol = df.copy()
-        
-        # Calculate dollar volume
-        df_vol['dollar_volume'] = df_vol[price_column] * df_vol[volume_column]
-        
-        # Calculate rolling average dollar volume
-        df_vol['avg_dollar_volume'] = df_vol['dollar_volume'].rolling(window=window).mean()
-        
-        # Calculate relative volume (compared to moving average)
-        df_vol['relative_volume'] = df_vol['dollar_volume'] / df_vol['avg_dollar_volume']
-        
-        # Calculate volume momentum (rate of change)
-        df_vol['volume_momentum'] = df_vol['dollar_volume'].pct_change(periods=window)
-        
-        # Add some additional volume metrics
-        df_vol['volume_ma'] = df_vol[volume_column].rolling(window=window).mean()
-        df_vol['volume_std'] = df_vol[volume_column].rolling(window=window).std()
-        df_vol['volume_zscore'] = (df_vol[volume_column] - df_vol['volume_ma']) / df_vol['volume_std']
-        
-        return df_vol    
-        
-        
-        
+
+ 
     def get_entry_price(self):
         """Sell limit 5 percent above the previous close"""
         return self.ticker_bars["close"].iloc[-1] * 0.95
@@ -217,16 +147,12 @@ class TheCatastropheHedge(Strategy):
         
     def get_stop_loss(self,entry):
         """
-        3 times the ATR of the last ten days above the execution price.
+        3 times the ATR of the last 40 days above the execution price.
         """
-        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
+        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=40)
         return entry + atr.iloc[-1] * 3
-    
-    def get_take_profit(self,entry):
-        """
-        If profit is 5 percent or more based on the closing price
-        """
-        return entry * 0.95
+
+
     
     def get_position_sizing(self): 
         """
