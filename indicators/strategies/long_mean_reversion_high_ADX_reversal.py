@@ -1,7 +1,9 @@
 '''
-Strategy 3: Long Mean Reversion Selloff
-
+Strategy 5: Long Mean Reversion High ADX Reversal
+To buy stocks that are in an uptrend, have a significant selloff (which is our buy point),
+and revert to their mean. 
 '''
+
 import webbrowser
 import pandas_ta as ta
 import pandas as pd
@@ -30,10 +32,10 @@ ALPACA_CONFIG = {
 }
 
 
-class LongMeanReversionSelloff(Strategy):
+class LongMeanReversionHighADXReversal(Strategy):
     
     parameters = {
-        "AvgDailyShares": 1000000,
+        "AvgDailyShares": 500000,
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
         "TrailStopLoss" : False, # True if you want to use a trail stop with no tp,
                               #False if you want to use a 2:1 tp:sl ratio
@@ -70,6 +72,7 @@ class LongMeanReversionSelloff(Strategy):
                                         quantity=position_size,
                                         limit_price=entry_price,
                                         side="buy",
+                                        time_in_force="gtd",
                                         good_till_date=self.get_datetime() + timedelta(days=1)
                                         )
                 self.submit_order(order)
@@ -81,7 +84,17 @@ class LongMeanReversionSelloff(Strategy):
         for order in orders:
             if order.status == "new" and order.side == "buy":
                 self.cancel_order(order)
-                        
+            
+            if order.status == "new" and order.side == "sell" and (order.good_till_date >= self.get_datetime()): 
+                self.cancel_order(order) # cancel the order                
+                ord = self.create_order( # Create market order and execute on next day open
+                                        asset = self.parameters["Ticker"], 
+                                        quantity=order.quantity,
+                                        side="sell_on_open",
+                                        )
+                self.submit_order(ord) 
+                
+                                        
     def on_canceled_order(self, order):
         
 #       print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
@@ -90,7 +103,10 @@ class LongMeanReversionSelloff(Strategy):
         
     
     def on_filled_order(self, position, order, price, quantity, multiplier):
-        
+        '''
+        Time-based: After six trading days, if not stopped out and the profit target is not hit,
+                    then exit next day market on open.
+        '''
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
         if  order.side == "sell":
@@ -98,16 +114,16 @@ class LongMeanReversionSelloff(Strategy):
         
         take_profit = self.get_take_profit(price)
         stop_loss = self.get_stop_loss(price)
-            
+        
         # Update order's take profit and stop loss prices
         order2 = self.create_order(asset = self.parameters["Ticker"],
                                     quantity=order.quantity,
                                     take_profit_price=take_profit,
                                     stop_loss_price= stop_loss,
                                     side="sell",
-                                    time_in_force="gtc"
+                                    time_in_force="gtd",
+                                    good_till_date=self.get_datetime() + timedelta(days=6)
                                     )
-        
         
         order.add_child_order(order2)
     #    self.submit_order(order2)
@@ -129,59 +145,114 @@ class LongMeanReversionSelloff(Strategy):
     ##### TRADING FUNCTIONS #####
     def filter(self):
         """
-        Minimum price of $1.00
-        Average volume over the last fifty days of 1 million shares
-        Average true range over the last ten days is 5 percent or higher. 
-        This gets us into volatile stocks, which we need for this system to work.
+Average daily volume over the last fifty trading days of at least 500,000 shares
+Average dollar volume of at least $2.5 million over the last fifty trading days.
+These two filters combined ensure that if we trade low-priced stocks, we will have sufficient volume.
+ATR greater than 4 percent. 
+We want to trade volatile stocks because this is a mean reversion system and is only in the stock for a few days.
         """
-        if self.ticker_bars["close"].iloc[-1] < 1:
-            return False
-          
         shares = self.ticker_bars["volume"].iloc[-50].mean() / self.ticker_bars["close"].iloc[-50].mean()
         if shares < self.parameters["AvgDailyShares"]:
             return False
         
+        avg_dollar_volume = self.calculate_dollar_volume(self.ticker_bars, price_column='close', volume_column='volume', window=50)["avg_dollar_volume"].iloc[-1]
+        if avg_dollar_volume < 2500000:
+            return False
+        
         atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        if atr is None or atr.iloc[-1] < 0.05:
+        if atr is None or atr.iloc[-1] < 0.04:
             return False
         
         return True
         
     def setup(self):
         """
-        Close is above the 150-day Simple Moving Average
-        The stock has dropped 12.5 percent or more in the last three days.
-        This setup measures a significant downward move in an uptrending stock.
+Close above 100-day SMA plus one ATR of the last ten days.
+This measures a more significant uptrend.
+Seven-day ADX is greater than fifty-five, showing good strength of movement.
+Three-day RSI is less than fifty.
+This indicates a moderate pullback.
         """
-        sma150 = ta.sma(self.ticker_bars["close"], length=150)
-        if self.ticker_bars["close"].iloc[-1] < sma150.iloc[-1]:
+        sma100 = ta.sma(self.ticker_bars["close"], length=100)
+        atr10 = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
+        
+        if self.ticker_bars["close"].iloc[-1] < (sma100.iloc[-1] + atr10.iloc[-1]):
             return False
         
-        if self.ticker_bars["close"].iloc[-1] < self.ticker_bars["close"].iloc[-4] * 0.875:
+        adx7 = ta.adx(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=7)
+        if adx7 is None or adx7["ADX_7"].iloc[-1] < 55.00:
             return False
         
+        rsi3 = ta.rsi(self.ticker_bars["close"], length=3)
+        if rsi3 is None or rsi3.iloc[-1] > 50.00:
+            return False
+
         return True
         
+    
+    
+    def calculate_dollar_volume(self,df, price_column='close', volume_column='volume', window=20):
+        """
+        Calculate dollar volume and related metrics.
         
+        Parameters:
+        -----------
+        df : pandas.DataFrame
+            DataFrame containing price and volume data
+        price_column : str, default 'close'
+            Name of the column containing price data
+        volume_column : str, default 'volume'
+            Name of the column containing volume data
+        window : int, default 20
+            Rolling window for average calculations
+            
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with the original data plus volume metrics
+        """
+        # Create a copy of the dataframe
+        df_vol = df.copy()
         
+        # Calculate dollar volume
+        df_vol['dollar_volume'] = df_vol[price_column] * df_vol[volume_column]
+        
+        # Calculate rolling average dollar volume
+        df_vol['avg_dollar_volume'] = df_vol['dollar_volume'].rolling(window=window).mean()
+        
+        # Calculate relative volume (compared to moving average)
+        df_vol['relative_volume'] = df_vol['dollar_volume'] / df_vol['avg_dollar_volume']
+        
+        # Calculate volume momentum (rate of change)
+        df_vol['volume_momentum'] = df_vol['dollar_volume'].pct_change(periods=window)
+        
+        # Add some additional volume metrics
+        df_vol['volume_ma'] = df_vol[volume_column].rolling(window=window).mean()
+        df_vol['volume_std'] = df_vol[volume_column].rolling(window=window).std()
+        df_vol['volume_zscore'] = (df_vol[volume_column] - df_vol['volume_ma']) / df_vol['volume_std']
+        
+        return df_vol    
+    
+    
         
     def get_entry_price(self):
-        """Limit order of 7 percent below the previous closing price."""
-        return self.ticker_bars["close"].iloc[-1] * 0.93
+        """Buy limit 3 percent below previous close"""
+        return self.ticker_bars["close"].iloc[-1] * 0.97
         
         
     def get_stop_loss(self,entry):
         """
-        2.5 times the ATR of the last ten days below the execution price.
+        3 times the ATR of the last ten days below the execution price.
         """
         atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        return entry - atr.iloc[-1] * 2.5
+        return entry - atr.iloc[-1] * 3
     
     def get_take_profit(self,entry):
         """
-        If profit is 4 percent or more based on the closing price
+        One ATR of the last ten days, then sell next day market on open
         """
-        return entry * 1.04
+        atr10 = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
+        return entry + atr10.iloc[-1]
     
     def get_position_sizing(self): 
         """
@@ -306,7 +377,7 @@ class LongMeanReversionSelloff(Strategy):
 def run_live():
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
-        strategy = LongMeanReversionSelloff(broker=broker,
+        strategy = LongMeanReversionHighADXReversal(broker=broker,
                                          parameters={"Ticker": Asset(symbol="NVDA",
                                                                     asset_type=Asset.AssetType.STOCK)
                                                      }
@@ -322,7 +393,7 @@ def run_backtest():
         backtesting_end = datetime(2024, 10, 23)
         budget = 2000
         # Run the backtest    
-        LongMeanReversionSelloff.backtest(
+        LongMeanReversionHighADXReversal.backtest(
             YahooDataBacktesting,
             backtesting_start,
             backtesting_end,

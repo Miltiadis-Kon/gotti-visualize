@@ -1,7 +1,13 @@
 '''
-Strategy 3: Long Mean Reversion Selloff
+Strategy 7: The Catastrophe Hedge
 
+A system that sells short when the market shows down momentum
+that guarantees us being in a short position.
+It must be a very liquid instrument, and preferably that instrument is replicated
+by a derivative in case it is not shortable.
+The key objective for this system is to make money when the market goes down in full momentum.
 '''
+
 import webbrowser
 import pandas_ta as ta
 import pandas as pd
@@ -30,7 +36,7 @@ ALPACA_CONFIG = {
 }
 
 
-class LongMeanReversionSelloff(Strategy):
+class TheCatastropheHedge(Strategy):
     
     parameters = {
         "AvgDailyShares": 1000000,
@@ -69,7 +75,7 @@ class LongMeanReversionSelloff(Strategy):
                 order = self.create_order(asset = self.parameters["Ticker"],
                                         quantity=position_size,
                                         limit_price=entry_price,
-                                        side="buy",
+                                        side="sell",
                                         good_till_date=self.get_datetime() + timedelta(days=1)
                                         )
                 self.submit_order(order)
@@ -79,7 +85,7 @@ class LongMeanReversionSelloff(Strategy):
         # Cancel all open orders apart from stop loss/ take profit orders
         orders = self.get_orders()
         for order in orders:
-            if order.status == "new" and order.side == "buy":
+            if order.status == "new" and order.side == "sell":
                 self.cancel_order(order)
                         
     def on_canceled_order(self, order):
@@ -104,7 +110,7 @@ class LongMeanReversionSelloff(Strategy):
                                     quantity=order.quantity,
                                     take_profit_price=take_profit,
                                     stop_loss_price= stop_loss,
-                                    side="sell",
+                                    side="buy",
                                     time_in_force="gtc"
                                     )
         
@@ -129,59 +135,98 @@ class LongMeanReversionSelloff(Strategy):
     ##### TRADING FUNCTIONS #####
     def filter(self):
         """
-        Minimum price of $1.00
-        Average volume over the last fifty days of 1 million shares
-        Average true range over the last ten days is 5 percent or higher. 
-        This gets us into volatile stocks, which we need for this system to work.
+        Minimum price $5
+        Average dollar volume $10 million over the last fifty trading days.
         """
-        if self.ticker_bars["close"].iloc[-1] < 1:
-            return False
-          
-        shares = self.ticker_bars["volume"].iloc[-50].mean() / self.ticker_bars["close"].iloc[-50].mean()
-        if shares < self.parameters["AvgDailyShares"]:
+        if self.ticker_bars["close"].iloc[-1] < 5:
             return False
         
-        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        if atr is None or atr.iloc[-1] < 0.05:
+        df_vol = self.calculate_dollar_volume(self.ticker_bars,window=50)
+               
+        if df_vol["avg_dollar_volume"].iloc[-1] < 10000000:
             return False
-        
+                
         return True
         
     def setup(self):
         """
-        Close is above the 150-day Simple Moving Average
-        The stock has dropped 12.5 percent or more in the last three days.
-        This setup measures a significant downward move in an uptrending stock.
+        The price of the stock has increased at least 20 percent over the last six trading days.
+        Last two days had positive closes. 
+        These two indicators mean the stock is very popular;
+        there has been a lot of buying pressure.
         """
-        sma150 = ta.sma(self.ticker_bars["close"], length=150)
-        if self.ticker_bars["close"].iloc[-1] < sma150.iloc[-1]:
+        if self.ticker_bars["close"].iloc[-1] < self.ticker_bars["close"].iloc[-2]:
             return False
         
-        if self.ticker_bars["close"].iloc[-1] < self.ticker_bars["close"].iloc[-4] * 0.875:
+        if self.ticker_bars["close"].iloc[-2] < self.ticker_bars["close"].iloc[-3]:
+            return False
+        
+        if (self.ticker_bars["high"].iloc[-1] - self.ticker_bars["low"].iloc[-7]) < 0.2 * self.ticker_bars["low"].iloc[-7]:
             return False
         
         return True
+    
+    def calculate_dollar_volume(self,df, price_column='close', volume_column='volume', window=20):
+        """
+        Calculate dollar volume and related metrics.
         
+        Parameters:
+        -----------
+        df : pandas.DataFrame
+            DataFrame containing price and volume data
+        price_column : str, default 'close'
+            Name of the column containing price data
+        volume_column : str, default 'volume'
+            Name of the column containing volume data
+        window : int, default 20
+            Rolling window for average calculations
+            
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with the original data plus volume metrics
+        """
+        # Create a copy of the dataframe
+        df_vol = df.copy()
+        
+        # Calculate dollar volume
+        df_vol['dollar_volume'] = df_vol[price_column] * df_vol[volume_column]
+        
+        # Calculate rolling average dollar volume
+        df_vol['avg_dollar_volume'] = df_vol['dollar_volume'].rolling(window=window).mean()
+        
+        # Calculate relative volume (compared to moving average)
+        df_vol['relative_volume'] = df_vol['dollar_volume'] / df_vol['avg_dollar_volume']
+        
+        # Calculate volume momentum (rate of change)
+        df_vol['volume_momentum'] = df_vol['dollar_volume'].pct_change(periods=window)
+        
+        # Add some additional volume metrics
+        df_vol['volume_ma'] = df_vol[volume_column].rolling(window=window).mean()
+        df_vol['volume_std'] = df_vol[volume_column].rolling(window=window).std()
+        df_vol['volume_zscore'] = (df_vol[volume_column] - df_vol['volume_ma']) / df_vol['volume_std']
+        
+        return df_vol    
         
         
         
     def get_entry_price(self):
-        """Limit order of 7 percent below the previous closing price."""
-        return self.ticker_bars["close"].iloc[-1] * 0.93
+        """Sell limit 5 percent above the previous close"""
+        return self.ticker_bars["close"].iloc[-1] * 0.95
         
         
     def get_stop_loss(self,entry):
         """
-        2.5 times the ATR of the last ten days below the execution price.
+        3 times the ATR of the last ten days above the execution price.
         """
         atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        return entry - atr.iloc[-1] * 2.5
+        return entry + atr.iloc[-1] * 3
     
     def get_take_profit(self,entry):
         """
-        If profit is 4 percent or more based on the closing price
+        If profit is 5 percent or more based on the closing price
         """
-        return entry * 1.04
+        return entry * 0.95
     
     def get_position_sizing(self): 
         """
@@ -306,7 +351,7 @@ class LongMeanReversionSelloff(Strategy):
 def run_live():
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
-        strategy = LongMeanReversionSelloff(broker=broker,
+        strategy = TheCatastropheHedge(broker=broker,
                                          parameters={"Ticker": Asset(symbol="NVDA",
                                                                     asset_type=Asset.AssetType.STOCK)
                                                      }
@@ -322,7 +367,7 @@ def run_backtest():
         backtesting_end = datetime(2024, 10, 23)
         budget = 2000
         # Run the backtest    
-        LongMeanReversionSelloff.backtest(
+        TheCatastropheHedge.backtest(
             YahooDataBacktesting,
             backtesting_start,
             backtesting_end,

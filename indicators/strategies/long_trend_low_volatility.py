@@ -1,8 +1,11 @@
 '''
-Strategy 3: Long Mean Reversion Selloff
+System 4: Long Trend Low Volatility
+
 
 '''
+
 import webbrowser
+import numpy as np
 import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
@@ -30,7 +33,7 @@ ALPACA_CONFIG = {
 }
 
 
-class LongMeanReversionSelloff(Strategy):
+class LongTrendLowVolatility(Strategy):
     
     parameters = {
         "AvgDailyShares": 1000000,
@@ -56,39 +59,33 @@ class LongMeanReversionSelloff(Strategy):
         
         self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"], 200, "day").df
         
+        self.snp_bars = self.get_historical_prices(Asset(symbol="SPY", asset_type=Asset.AssetType.STOCK), 200, "day").df
+        
         self.tradeable = self.filter()
         
         self.techincal = self.setup()
         
     def on_trading_iteration(self): 
-        
-        if self.tradeable and self.techincal:     
-            entry_price = self.get_entry_price()
+        '''
+        Entry on market open.
+        No TP.
+        Trailing stop of 20%.
+        SL of 1.5 * ATR40
+        '''
+        if self.tradeable and self.techincal:
+            # Entry market on open
             position_size = self.get_position_sizing()
             if position_size != 0:           
                 order = self.create_order(asset = self.parameters["Ticker"],
                                         quantity=position_size,
-                                        limit_price=entry_price,
                                         side="buy",
-                                        good_till_date=self.get_datetime() + timedelta(days=1)
+                                        trail_percent=0.2,
                                         )
                 self.submit_order(order)
 #               print(f"Order submitted: {order}. Date: {self.get_datetime()}")
-    
-    def after_market_closes(self):
-        # Cancel all open orders apart from stop loss/ take profit orders
-        orders = self.get_orders()
-        for order in orders:
-            if order.status == "new" and order.side == "buy":
-                self.cancel_order(order)
-                        
-    def on_canceled_order(self, order):
+ 
         
-#       print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
-        pass
-    
-        
-    
+           
     def on_filled_order(self, position, order, price, quantity, multiplier):
         
         # If the order is filled, we can print the order details
@@ -96,24 +93,20 @@ class LongMeanReversionSelloff(Strategy):
         if  order.side == "sell":
             return
         
-        take_profit = self.get_take_profit(price)
         stop_loss = self.get_stop_loss(price)
-            
         # Update order's take profit and stop loss prices
         order2 = self.create_order(asset = self.parameters["Ticker"],
                                     quantity=order.quantity,
-                                    take_profit_price=take_profit,
                                     stop_loss_price= stop_loss,
-                                    side="sell",
+                                    side="sell_to_open",
                                     time_in_force="gtc"
                                     )
-        
         
         order.add_child_order(order2)
     #    self.submit_order(order2)
 
         if self.is_backtesting and self.will_plot: 
-            self.schedule_plot(price,self.get_datetime(),stop_loss,take_profit) 
+            self.schedule_plot(price,self.get_datetime(),stop_loss,None) 
             
     
      
@@ -129,59 +122,89 @@ class LongMeanReversionSelloff(Strategy):
     ##### TRADING FUNCTIONS #####
     def filter(self):
         """
-        Minimum price of $1.00
-        Average volume over the last fifty days of 1 million shares
-        Average true range over the last ten days is 5 percent or higher. 
-        This gets us into volatile stocks, which we need for this system to work.
+        Average daily dollar volume greater than $100 million over the last fifty days.
+        Historic volatility rating between 10 and 40 percent, which puts us in the lower range on that metric.
         """
-        if self.ticker_bars["close"].iloc[-1] < 1:
-            return False
-          
-        shares = self.ticker_bars["volume"].iloc[-50].mean() / self.ticker_bars["close"].iloc[-50].mean()
-        if shares < self.parameters["AvgDailyShares"]:
+        if self.ticker_bars["volume"].iloc[-50].mean() < 100000000:
             return False
         
-        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        if atr is None or atr.iloc[-1] < 0.05:
+        historical_volatility = self.calculate_historical_volatility(self.ticker_bars, price_column='close', window=21, trading_days=252)["annualized_volatility"].iloc[-1]
+        
+#       print(historical_volatility)
+        
+        if historical_volatility < 0.1 or historical_volatility > 0.4:
             return False
         
         return True
         
     def setup(self):
         """
-        Close is above the 150-day Simple Moving Average
-        The stock has dropped 12.5 percent or more in the last three days.
-        This setup measures a significant downward move in an uptrending stock.
+        Close of the S&P 500 is above 200-day simple moving average. 
+        Close of the stock is above the 200-day simple moving average.
         """
-        sma150 = ta.sma(self.ticker_bars["close"], length=150)
-        if self.ticker_bars["close"].iloc[-1] < sma150.iloc[-1]:
+        sma200 = ta.sma(self.ticker_bars["close"], length=200)
+        if self.ticker_bars["close"].iloc[-1] < sma200.iloc[-1]:
             return False
         
-        if self.ticker_bars["close"].iloc[-1] < self.ticker_bars["close"].iloc[-4] * 0.875:
+        sma200_snp = ta.sma(self.snp_bars["close"], length=200)
+        
+        if self.snp_bars["close"].iloc[-1] < sma200_snp.iloc[-1]:
             return False
         
         return True
+    
+    
+    def calculate_historical_volatility(self,df, price_column='close', window=21, trading_days=252):
+        """
+        Calculate historical volatility for a given price series.
         
+        Parameters:
+        -----------
+        df : pandas.DataFrame
+            DataFrame containing the price data
+        price_column : str, default 'close'
+            Name of the column containing price data
+        window : int, default 21
+            Rolling window for volatility calculation (typically 21 for monthly)
+        trading_days : int, default 252
+            Number of trading days in a year
+            
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with the original data plus volatility metrics
+        """
+        # Create a copy of the dataframe
+        df_vol = df.copy()
         
+        # Calculate daily returns
+        df_vol['daily_return'] = df_vol[price_column].pct_change()
         
+        # Calculate daily log returns
+        df_vol['log_return'] = np.log(df_vol[price_column] / df_vol[price_column].shift(1))
         
-    def get_entry_price(self):
-        """Limit order of 7 percent below the previous closing price."""
-        return self.ticker_bars["close"].iloc[-1] * 0.93
+        # Calculate rolling standard deviation of log returns
+        df_vol['volatility'] = df_vol['log_return'].rolling(window=window).std()
+        
+        # Annualize the volatility
+        df_vol['annualized_volatility'] = df_vol['volatility'] * np.sqrt(trading_days)
+        
+        # Convert volatility to percentage
+        df_vol['volatility_pct'] = df_vol['volatility'] * 100
+        df_vol['annualized_volatility_pct'] = df_vol['annualized_volatility'] * 100
+        
+        return df_vol    
         
         
     def get_stop_loss(self,entry):
         """
-        2.5 times the ATR of the last ten days below the execution price.
+        The day after execution, we place a stop-loss of 
+        one-and-a-half times the average true range (ATR) 
+        of the last forty days below the execution price.        
         """
-        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        return entry - atr.iloc[-1] * 2.5
+        atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=40)
+        return entry - atr.iloc[-1] * 1.5
     
-    def get_take_profit(self,entry):
-        """
-        If profit is 4 percent or more based on the closing price
-        """
-        return entry * 1.04
     
     def get_position_sizing(self): 
         """
@@ -219,24 +242,30 @@ class LongMeanReversionSelloff(Strategy):
                                     name= f"Order {self.position_ctr}"
                                     )
                 
-                stop_loss = go.Scatter(x=[plot["date"],expiration],
+                self.scatters.append(buy)
+
+                
+                if plot["stop_loss"]:
+                
+                    stop_loss = go.Scatter(x=[plot["date"],expiration],
                                  y=[plot["stop_loss"],plot["stop_loss"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="red"),
                                     name= f"Order {self.position_ctr}"
                                     )
+                    
+                    self.scatters.append(stop_loss)
                 
-                take_profit = go.Scatter(x=[plot["date"],expiration],
+                if plot["take_profit"]:
+                    take_profit = go.Scatter(x=[plot["date"],expiration],
                                  y=[plot["take_profit"],plot["take_profit"]],
                                     mode="lines",
                                     marker=dict(size=[10],color="green"),
                                     name= f"Order {self.position_ctr}"
                                     )
-                
+                    self.scatters.append(take_profit)               
+
             #    scatter = [buy,stop_loss,take_profit]
-                self.scatters.append(buy)
-                self.scatters.append(stop_loss)
-                self.scatters.append(take_profit)               
                 break        
        
     def initialize_plot(self):
@@ -306,7 +335,7 @@ class LongMeanReversionSelloff(Strategy):
 def run_live():
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
-        strategy = LongMeanReversionSelloff(broker=broker,
+        strategy = LongTrendLowVolatility(broker=broker,
                                          parameters={"Ticker": Asset(symbol="NVDA",
                                                                     asset_type=Asset.AssetType.STOCK)
                                                      }
@@ -320,9 +349,9 @@ def run_backtest():
         # Define parameters
         backtesting_start = datetime(2023, 10, 23)
         backtesting_end = datetime(2024, 10, 23)
-        budget = 2000
+        budget = 10000
         # Run the backtest    
-        LongMeanReversionSelloff.backtest(
+        LongTrendLowVolatility.backtest(
             YahooDataBacktesting,
             backtesting_start,
             backtesting_end,
