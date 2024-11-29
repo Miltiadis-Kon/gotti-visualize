@@ -389,7 +389,7 @@ def run_live():
 
 def run_backtest():
         # Define parameters
-        backtesting_start = datetime(2023, 10, 23)
+        backtesting_start = datetime(2022, 10, 23)
         backtesting_end = datetime(2024, 10, 23)
         budget = 2000
         # Run the backtest    

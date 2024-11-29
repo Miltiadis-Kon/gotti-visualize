@@ -94,7 +94,7 @@ class TheCatastropheHedge(Strategy):
         
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
-        if  order.side == "sell":
+        if  order.side == "buy":
             return
         
         stop_loss = self.get_stop_loss(price)

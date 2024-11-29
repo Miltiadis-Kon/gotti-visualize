@@ -13,3 +13,4 @@ python-dotenv
 scipy
 alpaca-py
 lumibot
+lightweight-charts
