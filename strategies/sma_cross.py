@@ -55,22 +55,31 @@ class ChillGuy(Strategy):
         
         self.techincal = self.setup()
         
-    def on_trading_iteration(self): 
-        
+    def on_trading_iteration(self):       
         if self.tradeable and self.techincal:     
             position_size = self.get_position_sizing()
-            if position_size != 0:           
+            if position_size != 0:
+                lp=self.get_last_price(self.parameters["Ticker"])
+                stop_loss = self.get_stop_loss(lp)
+                take_profit = self.get_take_profit(lp)
                 order = self.create_order(asset = self.parameters["Ticker"],
                                         quantity=position_size,
-                                        side="buy"
+                                        side="buy",
+                                        type="bracket",
+                                        stop_loss_price=stop_loss,
+                                        take_profit_price=take_profit,
                                         )
-                
                 self.submit_order(order)
 #               print(f"Order submitted: {order}. Date: {self.get_datetime()}")
                                            
     def on_canceled_order(self, order):
         
-        print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
+    #    print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
+        pass
+    
+    def on_new_order(self, order):
+        
+    #    print(f"Order submitted: {order}. Date: {self.get_datetime()}")
         pass
     
     def on_filled_order(self, position, order, price, quantity, multiplier):
@@ -82,23 +91,7 @@ class ChillGuy(Strategy):
             if order.side == "buy":
                 self.chart.marker(time=self.get_datetime(), position='below', color="green", shape="arrowUp")
             if order.side == "sell":
-                self.chart.marker(time=self.get_datetime(), position='above', color="red", shape="arrowDown")
-    
-        if  order.side == "sell":
-            return
-        take_profit = self.get_take_profit(price)
-        stop_loss = self.get_stop_loss(price)
-        
- #       print(f"Take profit: {take_profit}, Stop loss: {stop_loss}")
-        # Update order's take profit and stop loss prices
-        order2 = self.create_order(asset = self.parameters["Ticker"],
-                                    quantity=quantity,
-                                    side="sell",
-                                    stop_loss_price=stop_loss,
-                                    take_profit_price=take_profit,
-                                    )
-        order.add_child_order(order2)
-        self.submit_order(order2)
+                self.chart.marker(time=self.get_datetime(), position='above', color="red", shape="arrowDown")    
     
 #endregion Core           
                                  
@@ -114,6 +107,7 @@ class ChillGuy(Strategy):
         '''
         sma_50 = ta.sma(self.ticker_bars["close"], length=50)
         sma_200 = ta.sma(self.ticker_bars["close"], length=200)
+
         if sma_50.iloc[-1] > sma_200.iloc[-1]:
             return True
         else:
@@ -144,9 +138,7 @@ class ChillGuy(Strategy):
 #region Plot
     def on_strategy_end(self):
         if self.will_plot:
-            self.plot()
-        return super().on_strategy_end()
-    
+            self.plot()    
     
     def plot(self):
         self.chart.set(self.get_historical_prices(self.parameters["Ticker"],365, "day").df) # Set the data #TODO: make it dynamic        
@@ -157,40 +149,30 @@ class ChillGuy(Strategy):
 
 
 #region Execution
-def run_live():
+def run_live(ticker="NVDA"):
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
-        strategy = ChillGuy(broker=broker,
-                                         parameters={"Ticker": Asset(symbol="NVDA",
-                                                                    asset_type=Asset.AssetType.STOCK)
-                                                     }
-                                        )
-
+        strategy = ChillGuy(
+            broker=broker,
+            parameters={"Ticker": Asset(symbol=ticker,asset_type=Asset.AssetType.STOCK)}
+        )
         # Run the strategy live
         trader.add_strategy(strategy)
         trader.run_all()
 
-def run_backtest():
+def run_backtest(ticker,backtesting_start = datetime(2023, 10, 23), backtesting_end = datetime(2024, 10, 23), budget = 10000):
         # Define parameters
-        backtesting_start = datetime(2023, 10, 23)
-        backtesting_end = datetime(2024, 10, 23)
-        budget = 2000
         # Run the backtest    
         ChillGuy.backtest(
             YahooDataBacktesting,
             backtesting_start,
             backtesting_end,
             budget=budget,
-            parameters={"Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK)},
+            parameters={"Ticker": Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)},
             show_plot=False,
             show_tearsheet=False,
             save_logfile=False,
             save_tearsheet=False,
         )
 
-
-if __name__ == "__main__":
-    run_backtest()
-    #run_live()
-    
 #endregion Execution
