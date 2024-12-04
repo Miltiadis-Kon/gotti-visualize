@@ -86,7 +86,11 @@ class ChillGuy(Strategy):
                                             take_profit_price=take_profit,
                                             )
                     self.submit_order(order)
-                    print(f"Order submitted: {order}. Date: {self.get_datetime()}")
+                    
+                    # Register order on database
+                    if not self.is_backtesting:
+                        self.register_order(order)
+                        print(f"Order submitted: {order}. Date: {self.get_datetime()}")
      
     
     def add_asset(self,ticker):
@@ -94,17 +98,7 @@ class ChillGuy(Strategy):
         self.tradeable = False
         self.techincal = False
         self.tradeable_assets[ticker] = self.TradeableAsset(ticker)
-                                          
-    def on_canceled_order(self, order):
-        
-    #    print(f"Order canceled: {order}. Status:{order.status} Date: {self.get_datetime()}")
-        pass
-    
-    def on_new_order(self, order):
-        
-    #    print(f"Order submitted: {order}. Date: {self.get_datetime()}")
-        pass
-    
+                                           
     def on_filled_order(self, position, order, price, quantity, multiplier):
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
@@ -115,7 +109,11 @@ class ChillGuy(Strategy):
                 self.chart.marker(time=self.get_datetime(), position='below', color="green", shape="arrowUp")
             if order.side == "sell":
                 self.chart.marker(time=self.get_datetime(), position='above', color="red", shape="arrowDown")    
-    
+                
+    def register_order(self, order):
+        
+        # Register the order on a database
+        pass
 #endregion Core           
                                  
 
@@ -174,7 +172,7 @@ class ChillGuy(Strategy):
 
 #region Execution
 def run_live(tickers = ['NVDA', 'AAPL','AMZN','TSLA','MARA']):
-        parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.CRYPTO) for ticker in tickers]}
+        parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK) for ticker in tickers]}
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
         strategy = ChillGuy(
