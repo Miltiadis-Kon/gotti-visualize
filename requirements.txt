@@ -15,3 +15,4 @@ alpaca-py
 lumibot
 lightweight-charts
 python-telegram-bot
+mysql-connector-python
