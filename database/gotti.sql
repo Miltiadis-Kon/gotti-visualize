@@ -11,20 +11,20 @@ CREATE TABLE users (
 );
 
 CREATE TABLE orders (
-    order_id INT AUTO_INCREMENT PRIMARY KEY,
+    order_id VARCHAR(50) NOT NULL ,
     strategy VARCHAR(50) NOT NULL,
     symbol VARCHAR(50) NOT NULL,
     quantity FLOAT NOT NULL,
-    price FLOAT NOT NULL,
+    price FLOAT,
     side VARCHAR(50) NOT NULL,
     order_state VARCHAR(50) NOT NULL,
     stop_loss_price FLOAT,
     take_profit_price FLOAT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE positions (
-    position_id INT AUTO_INCREMENT PRIMARY KEY,
+    position_id VARCHAR(50) NOT NULL,
     strategy VARCHAR(50) NOT NULL,
     symbol VARCHAR(50) NOT NULL,
     quantity FLOAT NOT NULL,
@@ -33,8 +33,8 @@ CREATE TABLE positions (
     stop_loss_price FLOAT,
     take_profit_price FLOAT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    based_on_order_id INT NOT NULL,
-    FOREIGN KEY (based_on_order_id) REFERENCES orders(order_id),
+    based_on_order_id VARCHAR(50) NOT NULL,
+    position_state VARCHAR(50) NOT NULL, 
     closed_at TIMESTAMP,
     closed_price FLOAT,
     closed_reason VARCHAR(50),

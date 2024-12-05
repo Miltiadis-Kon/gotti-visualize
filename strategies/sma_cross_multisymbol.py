@@ -1,4 +1,5 @@
 #region Imports
+import asyncio
 import webbrowser
 import pandas_ta as ta
 import pandas as pd
@@ -12,6 +13,11 @@ from lumibot.traders import Trader
 import os
 from dotenv import load_dotenv
 import lightweight_charts as chart
+
+import sys
+sys.path.append('./database')
+import db_functions as sql
+import requests
 
 
 load_dotenv()
@@ -27,8 +33,6 @@ ALPACA_CONFIG = {
 
 #endregion Imports
 
-
-
 class ChillGuy(Strategy):
     
     parameters = {
@@ -42,16 +46,19 @@ class ChillGuy(Strategy):
             self.ticker_bars = None
             self.tradeable = None
             self.techincal = None
+            
         def __str__(self):
             return f"Ticker: {self.ticker} Tradeable: {self.tradeable} Technical: {self.techincal}"  
 #region Core   
     ##### CORE FUNCTIONS #####
         
-    def initialize(self):
+    def initialize(self):        
         if self.parameters["Tickers"][0].asset_type == Asset.AssetType.CRYPTO:
             self.set_market('24/7')
         else:
             self.set_market('NASDAQ')
+            
+            
         self.sleeptime = "1D" # Execute strategy every day.
         self.will_plot = self.parameters["Plot"]
         if self.will_plot:
@@ -102,7 +109,9 @@ class ChillGuy(Strategy):
     def on_filled_order(self, position, order, price, quantity, multiplier):
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
-
+        if not self.is_backtesting:
+        #    asyncio.run(self.register_position(order,position,price,quantity))
+            pass
         if self.is_backtesting and self.will_plot:
             # Plot the trade
             if order.side == "buy":
@@ -111,9 +120,42 @@ class ChillGuy(Strategy):
                 self.chart.marker(time=self.get_datetime(), position='above', color="red", shape="arrowDown")    
                 
     def register_order(self, order):
+            url = "http://127.0.0.1:5000/orders"
+            order_data = {
+                "strategy": self.__class__.__name__,
+                "symbol": order.asset.symbol,
+                "quantity": order.quantity,
+                "price": self.get_last_price(order.asset),
+                "side": order.side,
+                "order_id": order.identifier,
+                "order_state": order.status,
+                "stop_loss_price": order.stop_loss_price,
+                "take_profit_price": order.take_profit_price
+            }
+            response = requests.post(url, json=order_data)
+            if response.status_code == 201:
+                print("Order posted successfully")
+            else:
+                print("Failed to post order")
         
-        # Register the order on a database
-        pass
+    def register_position(self, order, position,price,quantity):
+        url = "http://127.0.0.1:5000/positions"
+        position_data = {
+            "strategy": self.__class__.__name__,
+            "symbol": order.asset.symbol,
+            "quantity": quantity,
+            "price": price,
+            "side": order.side,
+            "stop_loss_price": order.stop_loss_price,
+            "take_profit_price": order.take_profit_price,
+            "based_on_order_id": order.identifier,
+            "position_state": position.status
+        }
+        response = requests.post(url, json=position_data)
+        if response.status_code == 201:
+            print("Position posted successfully")
+        else:
+            print("Failed to post position")
 #endregion Core           
                                  
 
@@ -133,9 +175,7 @@ class ChillGuy(Strategy):
             return True
         else:
             return False
-        
-              
-        
+                            
     def get_stop_loss(self,entry):
         '''
         5% stop loss
@@ -171,8 +211,8 @@ class ChillGuy(Strategy):
 
 
 #region Execution
-def run_live(tickers = ['NVDA', 'AAPL','AMZN','TSLA','MARA']):
-        parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK) for ticker in tickers]}
+def run_live(tickers = ['BTC', 'ETH','SOL']):
+        parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.CRYPTO) for ticker in tickers]}
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
         strategy = ChillGuy(
@@ -203,4 +243,4 @@ def run_backtest(tickers = ['NVDA', 'AAPL','AMZN','TSLA','MARA'],backtesting_sta
 
 if __name__ == '__main__':
    # run_backtest( )
-    run_live( )
+    run_live()

@@ -1,13 +1,19 @@
 import mysql.connector
+ 
+import os
+from dotenv import load_dotenv
+import random
+
+load_dotenv()
 
 def connect():
     return mysql.connector.connect(
         host="localhost",
         user = "root",
-        password = "root",
-        database = "mydatabase"
+        password = os.getenv("MYSQL_PASSWORD"),
+        database = "gotti"
     )
- 
+
  
 '''
 CREATE TABLE orders (
@@ -24,13 +30,19 @@ CREATE TABLE orders (
 );
 '''
 
-def insert_order(strategy, symbol, quantity, price, side, order_state, stop_loss_price, take_profit_price):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO orders (strategy, symbol, quantity, price, side, order_state, stop_loss_price, take_profit_price) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (strategy, symbol, quantity, price, side, order_state, stop_loss_price, take_profit_price))
-    conn.commit()
-    cursor.close()
-    conn.close()
+def insert_order(strategy, symbol, quantity, price, side,order_id, order_state, stop_loss_price, take_profit_price):
+    try:
+        conn = connect()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO orders (strategy, symbol, quantity, price, side,order_id, order_state, stop_loss_price, take_profit_price) VALUES (%s, %s, %s,%s, %s, %s, %s, %s, %s)", (strategy, symbol, quantity, price, side,order_id, order_state, stop_loss_price, take_profit_price))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(" Order added to db!")
+    except mysql.connector.Error as err:
+        print(f"Error: {err}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
     
 def update_order(order_id, order_state):
     conn = connect()
@@ -132,6 +144,7 @@ CREATE TABLE positions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     based_on_order_id INT NOT NULL,
     FOREIGN KEY (based_on_order_id) REFERENCES orders(order_id),
+    status VARCHAR(50),
     closed_at TIMESTAMP,
     closed_price FLOAT,
     closed_reason VARCHAR(50),
@@ -139,18 +152,18 @@ CREATE TABLE positions (
 );
 '''
 
-def insert_position(strategy, symbol, quantity, price, side, stop_loss_price, take_profit_price, based_on_order_id):
+def insert_position(strategy, symbol, quantity, price, side, stop_loss_price, take_profit_price, based_on_order_id,position_state):
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO positions (strategy, symbol, quantity, price, side, stop_loss_price, take_profit_price, based_on_order_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (strategy, symbol, quantity, price, side, stop_loss_price, take_profit_price, based_on_order_id))
+    cursor.execute("INSERT INTO positions (strategy, symbol, quantity, price, side, stop_loss_price, take_profit_price, based_on_order_id,position_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,%s)", (strategy, symbol, quantity, price, side, stop_loss_price, take_profit_price, based_on_order_id,position_state))
     conn.commit()
     cursor.close()
     conn.close()
     
-def update_position(position_id, closed_price, closed_reason):
+def update_position(position_id, closed_price, closed_reason,position_state):
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("UPDATE positions SET closed_price = %s, closed_reason = %s, closed_at = CURRENT_TIMESTAMP WHERE position_id = %s", (closed_price, closed_reason, position_id))
+    cursor.execute("UPDATE positions SET closed_price = %s, closed_reason = %s,position_state = %s, closed_at = CURRENT_TIMESTAMP WHERE position_id = %s", (closed_price, closed_reason,position_state, position_id))
     conn.commit()
     cursor.close()
     conn.close()
@@ -233,3 +246,18 @@ def get_positions(strategy=None, symbol=None, side=None, from_date=None, to_date
         cursor.close()
         conn.close()
         return positions
+
+
+
+# Example usage
+if __name__ == "__main__":
+    while True:
+        user_input = input("Press space to continue or 'q' to quit: ").strip().lower()
+        if user_input == 'q':
+            break
+        elif user_input == 'c':
+            order_id = random.randint(1, 1000)
+            insert_order("SMA_Cross", "AAPL", 10, 150.0, "buy",order_id, "filled", 145.0, 155.0)
+            orders = get_orders()
+            for order in orders:
+                print(order)
