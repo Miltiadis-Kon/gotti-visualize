@@ -18,6 +18,7 @@ import sys
 sys.path.append('./database')
 import db_functions as sql
 import requests
+import signal
 
 
 load_dotenv()
@@ -211,7 +212,7 @@ class ChillGuy(Strategy):
 
 
 #region Execution
-def run_live(tickers = ['BTC', 'ETH','SOL']):
+def run_live(tickers = ['BTC', 'ETH']):
         parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.CRYPTO) for ticker in tickers]}
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
@@ -242,5 +243,10 @@ def run_backtest(tickers = ['NVDA', 'AAPL','AMZN','TSLA','MARA'],backtesting_sta
 #endregion Execution
 
 if __name__ == '__main__':
+    def signal_handler(sig, frame):
+        print('Exiting...')
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
    # run_backtest( )
     run_live()
