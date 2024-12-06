@@ -1,5 +1,5 @@
-
-
+import requests
+from datetime import datetime, timedelta
 
 
 def get_into_msg(weekly_pnl_str,winrate_str,trades_str,positions_str,orders_str):
@@ -14,21 +14,39 @@ async def get_bot_info():
     orders_str = "✏️  Pending Orders:   100"
     return weekly_pnl_str,winrate_str,trades_str,positions_str,orders_str
 
+
+async def fetch_positions():
+    past_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    url = f'http://localhost:5000/positions?position_state=OPEN&from_date={past_week}'
+    response = requests.get(url)
+    return response.json()
+
+
 async def get_active_positions():
     """ Call the server to get the active positions"""
-    positions = "TICKER |  SIZE  |  ENTRY  |  PNL | TAKE PROFIT | STOP LOSS \n\n\
-                 ΤSLA |  100  |  345 $  | + 200 $ |  400 $ |  300 $ \n\n\
-                 AMZN |  50  |  50 $  | - 100 $ |  600 $ |  400 $ \n\n\
-                 NVDA |  20  |  245 $  | + 50 $ |  150 $ |  50 $ \n\n\
-                "
+    positions_data = await fetch_positions()
+    positions = ""
+    position_ctr=1
+    for position in positions_data:  
+        positions += f"{position_ctr}) {position[5]}    {position[2]} @   {position[4]}\nTP: {position[8]}    SL: {position[7]} \nStrategy: {position[1]}\n\n"
+        position_ctr+=1
     return positions
+
+
+
+async def fetch_orders():
+    past_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    url = f'http://localhost:5000/orders?order_state=new&from_date={past_week}'
+    response = requests.get(url)
+    return response.json()
 
 
 async def get_active_orders():
     """ Call the server to get the active orders"""
-    orders = "TICKER |  SIZE  |  ENTRY  |  PNL | TAKE PROFIT | STOP LOSS \n\n\
-                 ΤSLA |  100  |  345 $  | + 200 $ |  400 $ |  300 $ \n\n\
-                 AMZN |  50  |  50 $  | - 100 $ |  600 $ |  400 $ \n\n\
-                 NVDA |  20  |  245 $  | + 50 $ |  150 $ |  50 $ \n\n\
-                "
+    orders_data = await fetch_orders()
+    orders = ""
+    order_ctr=1
+    for order in orders_data:  
+        orders += f"{order_ctr}) {order[5]}  $ {order[2]} @ {order[4]}\nTP: {order[8]}    SL: {order[7]} \nStrategy: {order[1]}\n\n"
+        order_ctr+=1
     return orders

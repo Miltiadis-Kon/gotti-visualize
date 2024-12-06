@@ -112,6 +112,7 @@ class ChillGuy(Strategy):
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
         if not self.is_backtesting:
             self.register_position(order, position,price,quantity)
+            
             print(f"Position opened: {position}. Date: {self.get_datetime()}")
         if self.is_backtesting and self.will_plot:
             # Plot the trade

@@ -87,7 +87,7 @@ def delete_orders(strategy=None, symbol=None, side=None, from_date=None, to_date
     cursor.close()
     conn.close()
     
-def get_orders(strategy=None, symbol=None, side=None, from_date=None, to_date=None):
+def get_orders(strategy=None, symbol=None, side=None,state=None, from_date=None, to_date=None):
         """
         Get orders based on various filters.
         
@@ -124,6 +124,9 @@ def get_orders(strategy=None, symbol=None, side=None, from_date=None, to_date=No
         if to_date:
             query += " AND created_at <= %s"
             params.append(to_date)
+        if state:
+            query += " AND order_state = %s"
+            params.append(state)
         
         cursor.execute(query, tuple(params))
         orders = cursor.fetchall()

@@ -26,7 +26,8 @@ def get_orders():
     side = request.args.get('side')
     from_date = request.args.get('from_date')
     to_date = request.args.get('to_date')
-    orders = sql.get_orders(strategy, symbol, side, from_date, to_date)
+    state = request.args.get('order_state')
+    orders = sql.get_orders(strategy, symbol, side,state,from_date, to_date)
     return jsonify(orders), 200
 
 @app.route('/orders/<int:order_id>', methods=['PUT'])
