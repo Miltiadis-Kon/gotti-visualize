@@ -54,6 +54,7 @@ def create_position():
         based_on_order_id=data['based_on_order_id'],
         position_state=data['position_state']
     )
+    sql.update_order(data['based_on_order_id'], 'FILLED')
     return jsonify({"message": "Position created successfully"}), 201
 
 @app.route('/positions', methods=['GET'])

@@ -111,8 +111,8 @@ class ChillGuy(Strategy):
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
         if not self.is_backtesting:
-        #    asyncio.run(self.register_position(order,position,price,quantity))
-            pass
+            self.register_position(order, position,price,quantity)
+            print(f"Position opened: {position}. Date: {self.get_datetime()}")
         if self.is_backtesting and self.will_plot:
             # Plot the trade
             if order.side == "buy":
@@ -128,7 +128,7 @@ class ChillGuy(Strategy):
                 "quantity": order.quantity,
                 "price": self.get_last_price(order.asset),
                 "side": order.side,
-                "order_id": order.identifier,
+                "order_id": str(order.identifier),
                 "order_state": order.status,
                 "stop_loss_price": order.stop_loss_price,
                 "take_profit_price": order.take_profit_price
@@ -137,7 +137,7 @@ class ChillGuy(Strategy):
             if response.status_code == 201:
                 print("Order posted successfully")
             else:
-                print("Failed to post order")
+                print("Failed to post position")
         
     def register_position(self, order, position,price,quantity):
         url = "http://127.0.0.1:5000/positions"
@@ -149,7 +149,7 @@ class ChillGuy(Strategy):
             "side": order.side,
             "stop_loss_price": order.stop_loss_price,
             "take_profit_price": order.take_profit_price,
-            "based_on_order_id": order.identifier,
+            "based_on_order_id": str(order.identifier),
             "position_state": position.status
         }
         response = requests.post(url, json=position_data)
@@ -181,13 +181,13 @@ class ChillGuy(Strategy):
         '''
         5% stop loss
         '''
-        return entry * 0.95
+        return round(entry * 0.95,2)
     
     def get_take_profit(self,entry):
         '''
         10% take profit
         '''
-        return entry * 1.1
+        return round(entry * 1.1,2)
     
     def get_position_sizing(self,tradeable_asset): 
         '''
@@ -195,6 +195,7 @@ class ChillGuy(Strategy):
         '''
         cash = self.get_cash()
         size = cash * self.risk_percent / tradeable_asset.ticker_bars["close"].iloc[-1]
+        size = int(size)
         return size if size > 1 else 0
 #endregion Description
 
@@ -212,8 +213,8 @@ class ChillGuy(Strategy):
 
 
 #region Execution
-def run_live(tickers = ['BTC', 'ETH']):
-        parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.CRYPTO) for ticker in tickers]}
+def run_live(tickers = ['NVDA', 'AAPL','AMZN','TSLA','MARA']):
+        parameters = {"Tickers": [Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK) for ticker in tickers]}
         trader = Trader()
         broker = Alpaca(ALPACA_CONFIG)
         strategy = ChillGuy(
@@ -243,10 +244,5 @@ def run_backtest(tickers = ['NVDA', 'AAPL','AMZN','TSLA','MARA'],backtesting_sta
 #endregion Execution
 
 if __name__ == '__main__':
-    def signal_handler(sig, frame):
-        print('Exiting...')
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
    # run_backtest( )
     run_live()
