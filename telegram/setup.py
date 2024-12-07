@@ -14,6 +14,7 @@ ConversationHandler.
 Send /start to initiate the conversation.
 Press Ctrl-C on the command line to stop the bot.
 """
+import asyncio
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -23,9 +24,11 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     ConversationHandler,
+    MessageHandler,
 )
 
 import callbacks as cb
+
 
 # Enable logging
 logging.basicConfig(
@@ -41,10 +44,13 @@ START_ROUTES, END_ROUTES = range(2)
 # Callback data
 POSITIONS, ORDERS, HISTORY, STRATEGIES, SETTINGS,HOME = range(6)
 
+subscribe_to_new_orders = True
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send message on `/start`."""
     # Get user that sent /start and log his name
+    if subscribe_to_new_orders:
+        await start_periodic_task(update, context)
     user = update.message.from_user
     logger.info("User %s started the conversation.", user.first_name)
     # Build InlineKeyboard where each button has a displayed text
@@ -71,8 +77,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 #    await update.message.reply_text(msg, reply_markup=reply_markup)
     # Tell ConversationHandler that we're in state `FIRST` now
     return START_ROUTES
-
-
 
 
 async def start_over(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -198,6 +202,27 @@ async def back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def start_periodic_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start the periodic task to send new order messages."""
+    await periodic_send_new_order_msg(update, context)
+    
+
+async def periodic_send_new_order_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    while True:
+        await send_new_order_msg(update, context)
+        await asyncio.sleep(0.1)  # Sleep for 100 milliseconds
+
+
+
+async def send_new_order_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check for new orders and send message order to bot """
+    new_order = await cb.fetch_last_order()
+    if new_order is None:
+        return await update.message.reply_text("")
+    else:
+        msg = f"New Order:\n\n{new_order}"
+        await update.message.reply_text(msg)
+
 def main() -> None:
     """Run the bot."""
     # Create the Application and pass it your bot's token.
@@ -232,6 +257,9 @@ def main() -> None:
     # Add ConversationHandler to application that will be used for handling updates
     application.add_handler(conv_handler)
 
+    # Add a handler to send new order message
+    application.add_handler(CommandHandler("new_order", send_new_order_msg))
+    
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

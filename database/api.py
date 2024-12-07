@@ -17,7 +17,23 @@ def create_order():
         stop_loss_price=data.get('stop_loss_price'),
         take_profit_price=data.get('take_profit_price')
     )
+    #TODO: send order to telegram bot
+    set_last_order(data) # Update the last order in the cache
     return jsonify({"message": "Order created successfully"}), 201
+
+
+last_order=None # Cache the last order
+
+def set_last_order(order): # Set the last order in the cache
+    global last_order
+    last_order=order
+
+
+
+@app.route('/last_order', methods=['GET']) # Get the last order
+def get_last_order():
+    return jsonify(last_order), 200
+    
 
 @app.route('/orders', methods=['GET'])
 def get_orders():

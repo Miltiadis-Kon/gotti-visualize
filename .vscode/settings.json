@@ -5,6 +5,7 @@
         "./indicators/candlesticks",
         "./indicators/strategies",
         "./data",
-        "./database"
+        "./database",
+        "./telegram"
     ]
 }

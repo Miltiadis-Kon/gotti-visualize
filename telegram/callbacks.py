@@ -50,3 +50,19 @@ async def get_active_orders():
         orders += f"{order_ctr}) {order[5]}  $ {order[2]} @ {order[4]}\nTP: {order[8]}    SL: {order[7]} \nStrategy: {order[1]}\n\n"
         order_ctr+=1
     return orders
+
+
+    
+last_order = None # Cache the last order
+
+def set_last_order(order): # Set the last order in the cache
+    global last_order
+    last_order = order
+
+async def fetch_last_order():
+    url = 'http://localhost:5000/last_order' # Get the last order from the server
+    response = requests.get(url)
+    if last_order == response.json(): # If the last order is the same as the one in the cache, return None
+        return None
+    set_last_order(response.json()) # Set the last order in the cache
+    return response.json()  # Return the last order
