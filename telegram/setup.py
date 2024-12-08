@@ -16,8 +16,9 @@ Press Ctrl-C on the command line to stop the bot.
 """
 import asyncio
 import logging
+import threading
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -228,7 +229,7 @@ def main() -> None:
     """Run the bot."""
     # Create the Application and pass it your bot's token.
     application = Application.builder().token("7924089058:AAHfnR2vcgBq3LRyKVKu4XdqfRu0ofQMI40").build()
-
+    
     # Setup conversation handler with the states FIRST and SECOND
     # Use the pattern parameter to pass CallbackQueries with specific
     # data pattern to the corresponding handlers.
@@ -260,11 +261,10 @@ def main() -> None:
 
     # Add a handler to send new order message
     application.add_handler(CommandHandler("new_order", send_new_order_msg))
-    
+            
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
     main()
-    asyncio.run(listen())
