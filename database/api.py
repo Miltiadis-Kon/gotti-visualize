@@ -1,5 +1,10 @@
 from flask import Flask, request, jsonify
 import db_functions as sql
+import asyncio
+import websockets
+import threading
+from queue import Queue
+import json
 
 app = Flask(__name__)
 
@@ -18,22 +23,9 @@ def create_order():
         take_profit_price=data.get('take_profit_price')
     )
     #TODO: send order to telegram bot
-    set_last_order(data) # Update the last order in the cache
+    message_queue.put({"data": data})
     return jsonify({"message": "Order created successfully"}), 201
 
-
-last_order=None # Cache the last order
-
-def set_last_order(order): # Set the last order in the cache
-    global last_order
-    last_order=order
-
-
-
-@app.route('/last_order', methods=['GET']) # Get the last order
-def get_last_order():
-    return jsonify(last_order), 200
-    
 
 @app.route('/orders', methods=['GET'])
 def get_orders():
@@ -95,5 +87,39 @@ def delete_position(position_id):
     sql.delete_position(position_id)
     return jsonify({"message": "Position deleted successfully"}), 200
 
-if __name__ == '__main__':
-    app.run(debug=True)
+clients = set() # Store all connected clients
+message_queue = Queue() # Queue to store messages to be sent to clients
+
+async def handler(websocket): # Handler for WebSocket connections
+    clients.add(websocket)
+    try:
+        while True:
+            await websocket.wait_closed()
+    finally:
+        clients.remove(websocket)
+
+async def broadcast_messages():   # Broadcast messages to all connected clients
+    async with websockets.serve(handler, "localhost", 5055):
+        while True:
+            if not message_queue.empty(): # If there are messages in the queue
+                message = message_queue.get() # Get the message
+                if clients:
+                    websockets_tasks = [
+                        client.send(json.dumps(message)) # Send the message to all connected clients
+                        for client in clients
+                    ]
+                    await asyncio.gather(*websockets_tasks) # Wait for all messages to be sent
+            await asyncio.sleep(0.1) 
+
+def run_websocket_server(): # Run the WebSocket server
+    asyncio.run(broadcast_messages()) # Run the broadcast_messages function in an event loop
+
+# Start WebSocket server in a separate thread
+websocket_thread = threading.Thread(target=run_websocket_server) # Create a thread to run the WebSocket server
+websocket_thread.daemon = True # Set the thread as a daemon so it will be terminated when the main thread exits
+websocket_thread.start() # Start the thread
+
+
+
+if __name__ == "__main__":
+    app.run(port=5000, debug=True, use_reloader=False)

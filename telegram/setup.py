@@ -26,6 +26,7 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
 )
+import websockets
 
 import callbacks as cb
 
@@ -48,9 +49,6 @@ subscribe_to_new_orders = True
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send message on `/start`."""
-    # Get user that sent /start and log his name
-    if subscribe_to_new_orders:
-        await start_periodic_task(update, context)
     user = update.message.from_user
     logger.info("User %s started the conversation.", user.first_name)
     # Build InlineKeyboard where each button has a displayed text
@@ -201,27 +199,30 @@ async def back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.edit_message_text(text="See you next time!")
     return ConversationHandler.END
 
-
-async def start_periodic_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start the periodic task to send new order messages."""
-    await periodic_send_new_order_msg(update, context)
-    
-
-async def periodic_send_new_order_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    while True:
-        await send_new_order_msg(update, context)
-        await asyncio.sleep(0.1)  # Sleep for 100 milliseconds
-
-
-
 async def send_new_order_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check for new orders and send message order to bot """
-    new_order = await cb.fetch_last_order()
-    if new_order is None:
-        return await update.message.reply_text("")
+    """Send a message when it is recieved from the ws"""
+    if not subscribe_to_new_orders:
+        return
+    query = update.callback_query
+    await query.answer()
+    order = cb.last_order
+    if order:
+        msg = f"New Order: {order['symbol']} {order['quantity']} @ {order['price']}\nSL: {order['stop_loss_price']} TP: {order['take_profit_price']}"
+        await query.edit_message_text(text=msg)
     else:
-        msg = f"New Order:\n\n{new_order}"
-        await update.message.reply_text(msg)
+        await query.edit_message_text(text="No new orders")
+    return START_ROUTES
+
+async def listen():
+    uri = "ws://localhost:5055"
+    async with websockets.connect(uri) as websocket:
+        print("Connected to WebSocket server")
+        try:
+            async for message in websocket:
+                cb.set_last_order(message)
+        except websockets.ConnectionClosed:
+            print("Connection closed")
+
 
 def main() -> None:
     """Run the bot."""
@@ -266,3 +267,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    asyncio.run(listen())

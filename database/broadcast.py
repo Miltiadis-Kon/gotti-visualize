@@ -1,50 +1,47 @@
+from flask import Flask
 import asyncio
-import threading
 import websockets
+import threading
+from queue import Queue
+import json
 
-connected_clients = set()
-broadcast_bool = False
+app = Flask(__name__)
+clients = set()
+message_queue = Queue()
 
-def set_broadcast_bool():
-    global broadcast_bool
-    broadcast_bool = True
-
-async def broadcast(data):
-    if connected_clients:
-        message = data  # Ensure data is a string or serialize it
-        await asyncio.gather(*[client.send(message) for client in connected_clients])
-    await asyncio.sleep(1)  # Prevent spamming the message
-
-async def websocket_handler(websocket, path):
-    # Register client
-    connected_clients.add(websocket)
+async def handler(websocket):
+    clients.add(websocket)
     try:
-        async for message in websocket:
-            # Handle incoming messages if needed
-            pass
+        while True:
+            await websocket.wait_closed()
     finally:
-        # Unregister client
-        connected_clients.remove(websocket)
+        clients.remove(websocket)
 
-async def function_2():
-    global broadcast_bool
-    while True:
-        if broadcast_bool:
-            await broadcast("RE")
-            broadcast_bool = False
-        await asyncio.sleep(0.1)  # Prevent tight loop
+async def broadcast_messages():
+    async with websockets.serve(handler, "localhost", 5055):
+        while True:
+            if not message_queue.empty():
+                message = message_queue.get()
+                if clients:
+                    websockets_tasks = [
+                        client.send(json.dumps(message))
+                        for client in clients
+                    ]
+                    await asyncio.gather(*websockets_tasks)
+            await asyncio.sleep(0.1)
 
-async def main():
-    server = await websockets.serve(websocket_handler, "localhost", 5055)
-    broadcaster = asyncio.create_task(function_2())
-    await asyncio.Future()  # Run forever
+def run_websocket_server():
+    asyncio.run(broadcast_messages())
 
-def input_loop():
-    while True:
-        if input("Enter 'broadcast' to send message to all clients: ") == "b":
-            set_broadcast_bool()
+# Start WebSocket server in a separate thread
+websocket_thread = threading.Thread(target=run_websocket_server)
+websocket_thread.daemon = True
+websocket_thread.start()
+
+@app.route('/send/<message>')
+def send_message(message):
+    message_queue.put({"data": message})
+    return f"Message '{message}' queued for broadcast"
 
 if __name__ == "__main__":
-    input_thread = threading.Thread(target=input_loop, daemon=True)
-    input_thread.start()
-    asyncio.run(main())
+    app.run(port=5000, debug=True, use_reloader=False)
