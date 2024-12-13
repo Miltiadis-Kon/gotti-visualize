@@ -16,15 +16,16 @@ import lightweight_charts as chart
 
 import sys
 sys.path.append('./database')
-import db_functions as sql
 import requests
 import signal
 
 
 load_dotenv()
 
+
 apikey = os.getenv("APCA_API_KEY_PAPER")
 apisecret = os.getenv("APCA_API_SECRET_KEY_PAPER")
+PORT = 8000
 
 ALPACA_CONFIG = {
     "API_KEY":apikey,
@@ -122,17 +123,10 @@ class ChillGuy(Strategy):
                 self.chart.marker(time=self.get_datetime(), position='above', color="red", shape="arrowDown")    
                 
     def register_order(self, order):
-            url = "http://127.0.0.1:5000/orders"
+            url = f"http://127.0.0.1:{PORT}/add_order_sql"
             order_data = {
                 "strategy": self.__class__.__name__,
-                "symbol": order.asset.symbol,
-                "quantity": order.quantity,
-                "price": self.get_last_price(order.asset),
-                "side": order.side,
                 "order_id": str(order.identifier),
-                "order_state": order.status,
-                "stop_loss_price": order.stop_loss_price,
-                "take_profit_price": order.take_profit_price
             }
             response = requests.post(url, json=order_data)
             if response.status_code == 201:
@@ -141,7 +135,7 @@ class ChillGuy(Strategy):
                 print("Failed to post position")
         
     def register_position(self, order, position,price,quantity):
-        url = "http://127.0.0.1:5000/positions"
+        url = f"http://127.0.0.1:{PORT}/positions"
         position_data = {
             "strategy": self.__class__.__name__,
             "symbol": order.asset.symbol,
