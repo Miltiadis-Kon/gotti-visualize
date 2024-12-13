@@ -1,6 +1,8 @@
 # Welcome to  Gotti - Visualizer
 
-This repository will be used to **process and visualize** data and **technical indicators**  of a single stock ticker **using python**. The goal is to implement an automated UI **similar to TradingView**.
+This repository is to be used alongside gotti-backend and gotti-frontend repositiories. 
+
+This is the core repository that includes all trading strategies, backtesting, signal generation and data processing. 
 
 ![Visualization Example](AAPL_2024-09-21_15-57-59.png)
 
