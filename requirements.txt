@@ -1,8 +1,4 @@
 pandas
-numpy
-matplotlib
-mplfinance
-stock_indicators
 pandas_ta
 python-dotenv
 alpaca-py
