@@ -67,7 +67,7 @@ class ChillGuy(Strategy):
         self.will_plot = self.parameters["Plot"]
         if self.will_plot:
             self.chart = chart.Chart(title="ChillGuy",toolbox=True)
-        self.risk_percent = 0.2 # 2% risk per trade
+        self.risk_percent = 0.01 # 2% risk per trade
         
         # Create a dictionary to store the tradeable assets
         self.tradeable_assets = {}
@@ -126,9 +126,12 @@ class ChillGuy(Strategy):
                 "strategy": self.__class__.__name__,
                 "order_id": str(order.identifier),
         }
-        response = requests.post(url, json=order_data)
-        print(response.json())
-    
+        try:
+            response = requests.post(url, json=order_data)
+            print(response.json())
+        except Exception as e:
+            print(f"Error registering order: {e}")
+            return False   
 #endregion Core           
                                  
 
