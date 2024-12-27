@@ -231,8 +231,3 @@ def run_live_crypto(tickers = ['SOL', 'BTC','DOT','SHIB','SUSHI']):
         trader.run_all()
 
 #endregion Execution
-
-if __name__ == '__main__':
-   # run_backtest( )
-    run_live(['MARA','NKE'])
-   # run_live_crypto()

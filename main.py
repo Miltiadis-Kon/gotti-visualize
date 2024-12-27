@@ -2,7 +2,7 @@ import streamlit as st
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from strategies.sma_cross_multisymbol import ChillGuy, run_backtest, run_live
+from strategies.sma_cross_multisymbol import ChillGuy, run_backtest, run_live,run_live_crypto
 from multiprocessing import Process
 
 # Load environment variables
