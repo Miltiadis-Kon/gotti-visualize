@@ -5,3 +5,4 @@ alpaca-py
 lumibot
 lightweight-charts
 streamlit
+numpy
