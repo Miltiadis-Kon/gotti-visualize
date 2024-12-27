@@ -13,11 +13,10 @@ from lumibot.traders import Trader
 import os
 from dotenv import load_dotenv
 import lightweight_charts as chart
-
+import streamlit as st
 import sys
 sys.path.append('./database')
 import requests
-import signal
 
 
 load_dotenv()
@@ -25,7 +24,8 @@ load_dotenv()
 
 apikey = os.getenv("APCA_API_KEY_PAPER")
 apisecret = os.getenv("APCA_API_SECRET_KEY_PAPER")
-PORT = 8000
+PORT = 10000
+HOST = "https://gotti-backend.onrender.com"
 
 ALPACA_CONFIG = {
     "API_KEY":apikey,
@@ -102,6 +102,7 @@ class ChillGuy(Strategy):
                     if not self.is_backtesting:
                         asyncio.run(self.register_order(order))
                         print(f"Order submitted: {order}. Date: {self.get_datetime()}")
+                        st.write(f"Order submitted: {order}. Date: {self.get_datetime()}")
      
     
     def add_asset(self,ticker):
@@ -121,7 +122,7 @@ class ChillGuy(Strategy):
                 self.chart.marker(time=self.get_datetime(), position='above', color="red", shape="arrowDown")    
                 
     async def register_order(self, order):
-        url = f"http://127.0.0.1:{PORT}/update_order_strategy"
+        url = f"{HOST}/update_order_strategy"
         order_data = {
                 "strategy": self.__class__.__name__,
                 "order_id": str(order.identifier),

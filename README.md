@@ -10,7 +10,7 @@ This is the core repository that includes all trading strategies, backtesting, s
 
 ```python
 pip install --requirements.txt
-python -m main.py
+streamlit run ./main.py
 ```
 
 ### Overview
