@@ -100,16 +100,20 @@ class KeyLevels:
         Number of bars before/after for pivot detection (default 10)
     use_alpaca : bool
         Whether to use Alpaca API (default True, falls back to Yahoo if unavailable)
+    as_of_date : datetime
+        Calculate levels as of this date (for backtesting). If None, uses current date.
     """
     
     def __init__(self, ticker: str = "NVDA", 
                  tolerance_pct: float = 0.5, 
                  pivot_lookback: int = 10,
-                 use_alpaca: bool = True):
+                 use_alpaca: bool = True,
+                 as_of_date: datetime = None):
         self.ticker = ticker
         self.tolerance_pct = tolerance_pct
         self.pivot_lookback = pivot_lookback
         self.use_alpaca = use_alpaca and ALPACA_AVAILABLE
+        self.as_of_date = as_of_date  # For backtesting - calculate levels as of this date
         self.timeframe_data = {}  # Store data for each timeframe
         self.all_levels_df = None
         
@@ -137,7 +141,8 @@ class KeyLevels:
         lookback_days : int
             Number of days to look back
         """
-        end_date = datetime.now()
+        # Use as_of_date if provided (for backtesting), otherwise use current date
+        end_date = self.as_of_date if self.as_of_date else datetime.now()
         start_date = end_date - timedelta(days=lookback_days)
         
         print(f"Fetching {self.ticker} {interval} data from {start_date.date()} to {end_date.date()}...")
