@@ -110,89 +110,70 @@ if data_source == "Load from File":
     trades_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     logs_dir = os.path.join(trades_dir, "logs")
     
-    # Find available trade files (JSON format from our TradeTracker)
-    trade_files = []
+    def extract_ticker_from_filename(filename):
+        """Extract ticker from filename patterns."""
+        basename = os.path.basename(filename).replace('.json', '').replace('.csv', '')
+        
+        # Old format: TICKER_trades  
+        if '_trades' in basename:
+            return basename.split('_trades')[0]
+        
+        # New format: DDMM_HHMM_TICKER_STRATEGY
+        parts = basename.split('_')
+        if len(parts) >= 4:
+            return parts[2]  # Third part is ticker
+        
+        return None
+    
+    # Find all trade files and extract tickers
+    all_trade_files = []
+    available_tickers = set()
+    
     for search_dir in [trades_dir, logs_dir]:
         if os.path.exists(search_dir):
             for f in os.listdir(search_dir):
-                # Our JSON format: {TICKER}_trades.json or any *trades*.json
-                if f.endswith('.json') and 'trade' in f.lower():
-                    trade_files.append(os.path.join(search_dir, f))
-                # Lumibot's native CSV format (KeyLevelsStrategy_*_trades.csv)
-                if f.endswith('_trades.csv') and 'KeyLevelsStrategy' in f:
-                    trade_files.append(os.path.join(search_dir, f))
+                # Skip Lumibot's native format
+                if f.startswith('KeyLevels') or f.startswith('Simple5m') or f.startswith('Multi'):
+                    continue
+                if f.endswith('.json'):
+                    filepath = os.path.join(search_dir, f)
+                    # Old format: TICKER_trades.json
+                    if '_trades.json' in f:
+                        all_trade_files.append(filepath)
+                        ticker_name = extract_ticker_from_filename(f)
+                        if ticker_name:
+                            available_tickers.add(ticker_name)
+                    # New format: DDMM_HHMM_TICKER_STRATEGY.json
+                    elif f.count('_') >= 3:
+                        all_trade_files.append(filepath)
+                        ticker_name = extract_ticker_from_filename(f)
+                        if ticker_name:
+                            available_tickers.add(ticker_name)
+    
+    # Add "All" option to tickers
+    ticker_options = ["All"] + sorted(list(available_tickers))
+    
+    # Ticker filter dropdown
+    if ticker_options:
+        selected_ticker = st.sidebar.selectbox(
+            "🎯 Filter by Ticker",
+            ticker_options,
+            index=0
+        )
+    else:
+        selected_ticker = "All"
+    
+    # Filter files by selected ticker
+    if selected_ticker == "All":
+        trade_files = all_trade_files
+    else:
+        trade_files = [
+            f for f in all_trade_files 
+            if extract_ticker_from_filename(f) == selected_ticker
+        ]
     
     # Sort by modification time (newest first)
     trade_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-    
-    def parse_lumibot_trades_csv(filepath):
-        """Parse Lumibot's native trades CSV format into Trade objects."""
-        df = pd.read_csv(filepath)
-        
-        if df.empty:
-            return [], "UNKNOWN"
-        
-        # Get ticker from symbol column
-        ticker = df['symbol'].iloc[0] if 'symbol' in df.columns else "UNKNOWN"
-        
-        # Group by buy/sell pairs
-        trades = []
-        trade_id = 1
-        
-        # Get filled orders only
-        fills = df[df['status'] == 'fill'].copy()
-        
-        if fills.empty:
-            return [], ticker
-        
-        # Pair buys with sells
-        buys = fills[fills['side'] == 'buy'].copy()
-        sells = fills[fills['side'] == 'sell'].copy()
-        
-        for i, (_, buy) in enumerate(buys.iterrows()):
-            entry_time = pd.to_datetime(buy['time'])
-            entry_price = float(buy['price'])
-            quantity = int(buy['filled_quantity'])
-            
-            # Find next sell after this buy
-            later_sells = sells[pd.to_datetime(sells['time']) > entry_time]
-            
-            if not later_sells.empty:
-                sell = later_sells.iloc[0]
-                exit_time = pd.to_datetime(sell['time'])
-                exit_price = float(sell['price'])
-                pnl = (exit_price - entry_price) * quantity
-                pnl_percent = ((exit_price - entry_price) / entry_price) * 100
-                
-                # Simple estimate of TP/SL based on entry price
-                # (Lumibot doesn't store TP/SL in its trade files)
-                tp_estimate = entry_price * 1.05  # 5% above entry
-                sl_estimate = entry_price * 0.95  # 5% below entry
-                
-                trade = Trade(
-                    trade_id=trade_id,
-                    ticker=ticker,
-                    trade_type="BUY",
-                    date_executed=entry_time.to_pydatetime(),
-                    entry_price=entry_price,
-                    quantity=quantity,
-                    take_profit=tp_estimate,
-                    stop_loss=sl_estimate,
-                    support_level=entry_price * 0.98,
-                    resistance_level=entry_price * 1.08,
-                    date_completed=exit_time.to_pydatetime(),
-                    exit_price=exit_price,
-                    exit_reason="TP" if pnl > 0 else "SL",
-                    pnl=pnl,
-                    pnl_percent=pnl_percent
-                )
-                trades.append(trade)
-                trade_id += 1
-                
-                # Remove this sell from the pool
-                sells = sells[sells.index != sell.name]
-        
-        return trades, ticker
     
     if trade_files:
         selected_file = st.sidebar.selectbox(
@@ -203,26 +184,23 @@ if data_source == "Load from File":
         
         if selected_file and os.path.exists(selected_file):
             try:
-                if selected_file.endswith('.json'):
-                    # Our JSON format
-                    tracker = TradeTracker.load_from_json(selected_file)
-                    trades = tracker.trades
-                    ticker = tracker.ticker
-                else:
-                    # Lumibot's CSV format
-                    trades, ticker = parse_lumibot_trades_csv(selected_file)
-                    tracker = None
+                tracker = TradeTracker.load_from_json(selected_file)
+                trades = tracker.trades
+                ticker = tracker.ticker
                 
                 if trades:
-                    st.sidebar.success(f"Loaded {len(trades)} trades for {ticker}")
+                    st.sidebar.success(f"✅ Loaded {len(trades)} trades for {ticker}")
                 else:
-                    st.sidebar.warning("No trades found in file")
+                    st.sidebar.warning("No trades in file")
             except Exception as e:
                 st.sidebar.error(f"Error loading file: {e}")
                 import traceback
                 st.sidebar.code(traceback.format_exc())
     else:
-        st.sidebar.warning("No trade files found. Run a backtest first.")
+        if selected_ticker != "All":
+            st.sidebar.warning(f"No trade files for {selected_ticker}. Run a backtest first.")
+        else:
+            st.sidebar.warning("No trade files found. Run a backtest first.")
         
     # Manual file upload
     uploaded_file = st.sidebar.file_uploader("Or upload trades file", type=['json', 'csv'])
@@ -319,14 +297,23 @@ if trades:
 
 # Fetch chart data
 @st.cache_data(ttl=300)
-def get_chart_data(ticker, timeframe, as_of_date=None):
-    """Fetch OHLCV data for the chart."""
+def get_chart_data_for_range(ticker, timeframe, start_date, end_date):
+    """Fetch OHLCV data for a specific date range."""
     try:
-        kl = KeyLevels(ticker=ticker, use_alpaca=False, as_of_date=as_of_date)
-        # TIMEFRAME_LOOKBACK values are dicts with 'days' and 'label' keys
-        lookback_config = TIMEFRAME_LOOKBACK.get(timeframe, {'days': 180, 'label': '1D'})
-        lookback_days = lookback_config['days'] if isinstance(lookback_config, dict) else 180
-        df = kl.fetch_data(interval=timeframe, lookback_days=lookback_days)
+        import yfinance as yf
+        stock = yf.Ticker(ticker)
+        
+        df = stock.history(
+            start=start_date,
+            end=end_date + timedelta(days=1),
+            interval=timeframe,
+            prepost=True
+        )
+        
+        df.columns = [col.lower() for col in df.columns]
+        df = df[df['volume'] != 0]
+        df.reset_index(inplace=True)
+        
         return df
     except Exception as e:
         st.error(f"Error fetching data: {e}")
@@ -344,9 +331,22 @@ def get_key_levels_data(ticker, timeframes):
         st.error(f"Error fetching levels: {e}")
         return None
 
-# Get chart data
+# Determine date range from trades
+if trades:
+    trade_dates = [t.date_executed for t in trades if t.date_executed]
+    if trade_dates:
+        chart_start = min(trade_dates) - timedelta(days=2)
+        chart_end = max(trade_dates) + timedelta(days=2)
+    else:
+        chart_start = datetime.now() - timedelta(days=30)
+        chart_end = datetime.now()
+else:
+    chart_start = datetime.now() - timedelta(days=30)
+    chart_end = datetime.now()
+
+# Get chart data for trade date range
 with st.spinner(f"Loading {ticker} data..."):
-    chart_df = get_chart_data(ticker, selected_timeframe)
+    chart_df = get_chart_data_for_range(ticker, selected_timeframe, chart_start, chart_end)
     
     if show_key_levels:
         levels_df = get_key_levels_data(ticker, ['1d', '4h', '1h', '15m', '5m'])
@@ -354,11 +354,15 @@ with st.spinner(f"Loading {ticker} data..."):
         levels_df = None
 
 if chart_df is not None and not chart_df.empty:
-    # Prepare date column
-    if 'Date' in chart_df.columns:
-        chart_df['date_plot'] = pd.to_datetime(chart_df['Date'])
-    elif 'Datetime' in chart_df.columns:
-        chart_df['date_plot'] = pd.to_datetime(chart_df['Datetime'])
+    # Prepare date column - check both upper and lowercase (Yahoo uses lowercase after reset_index)
+    date_col_found = None
+    for col in ['Date', 'Datetime', 'date', 'datetime', 'index', 'Index']:
+        if col in chart_df.columns:
+            date_col_found = col
+            break
+    
+    if date_col_found:
+        chart_df['date_plot'] = pd.to_datetime(chart_df[date_col_found])
     else:
         chart_df['date_plot'] = pd.to_datetime(chart_df.index)
     
