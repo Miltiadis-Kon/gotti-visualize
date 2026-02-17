@@ -6,3 +6,7 @@ lumibot
 lightweight-charts
 streamlit
 numpy< 2.0.0
+
+# API
+fastapi
+uvicorn

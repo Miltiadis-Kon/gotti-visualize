@@ -1,5 +1,5 @@
 services:
-  # ── Streamlit backend ──
+  # ── Streamlit Dashboard ──
   app:
     build: .
     container_name: gotti-backend
@@ -8,6 +8,27 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8501/_stcore/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── FastAPI Backend ──
+  api:
+    build: .
+    container_name: gotti-api
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ── Cloudflare Tunnel sidecar ──
   tunnel:
@@ -16,6 +37,8 @@ services:
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       app:
+        condition: service_healthy
+      api:
         condition: service_healthy
     restart: unless-stopped
     env_file:
