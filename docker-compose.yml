@@ -1,0 +1,22 @@
+services:
+  # ── Streamlit backend ──
+  app:
+    build: .
+    container_name: gotti-backend
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  # ── Cloudflare Tunnel sidecar ──
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: gotti-tunnel
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    env_file:
+      - .env
