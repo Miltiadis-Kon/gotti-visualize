@@ -746,8 +746,8 @@ if __name__ == "__main__":
     # Run backtest by default
     run_backtest(
         ticker="PLTR",
-        start_date=datetime(2025, 12, 1),
-        end_date=datetime(2025, 12, 24),
+        start_date=datetime(2026, 1, 10),
+        end_date=datetime(2026, 1, 20),
         budget=10000,
         min_importance=2,
         tp_threshold=0.02,
