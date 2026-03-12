@@ -121,3 +121,21 @@ Please ensure your code adheres to the project's coding standards and includes a
 ### License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
+
+
+
+### Fibonacci levels 
+Column	Fib Level
+fib_0	0%
+fib_236	23.6%
+fib_382	38.2%
+fib_500	50%
+fib_618	61.8%
+fib_786	78.6%
+fib_1000	100%
+For downtrend patterns (e.g., row 0: NVDA $169.54-$212.18), fib_0 = low price (169.54) and fib_1000 = high price (212.18), with retracement levels ascending between them.
+
+For uptrend patterns (e.g., row 7: $169.54-$193.63), fib_0 = high price (193.63) and fib_1000 = low price (169.54), with retracement levels descending.
+
+The entry_price matches fib_618 and stop_loss matches fib_786 as expected. All 11 trade setups have a risk_reward of 3.68.
+
