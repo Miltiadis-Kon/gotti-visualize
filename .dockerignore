@@ -1,0 +1,44 @@
+# Version control
+.git/
+.gitignore
+
+# Virtual environments
+venv/
+.venv/
+.conda/
+ENV/
+
+# IDE / editor
+.vscode/
+.devcontainer/
+.idea/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Outputs & logs
+logs/
+plots/
+*.png
+*.log
+
+# Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Secrets
+.env
+
+# Docker files (no need to nest)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Misc
+LICENSE
+README.md
+BACKTESTING_ARCHITECTURE.md
+install_deps.bat
+tests/
