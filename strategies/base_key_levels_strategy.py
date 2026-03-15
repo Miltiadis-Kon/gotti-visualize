@@ -29,10 +29,9 @@ from lumibot.entities import Asset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from key_levels import (
-    KeyLevels,
-    TIMEFRAME_LOOKBACK,
-    TIMEFRAME_IMPORTANCE,
-    PRICE_THRESHOLD
+    analyze,
+    RESOLUTION_IMPORTANCE,
+    DEFAULT_PRICE_THRESHOLD
 )
 from trade_tracker import TradeTracker
 
@@ -61,8 +60,7 @@ class BaseKeyLevelsStrategy(Strategy):
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
         "RISK_PERCENT": 0.02,      # Risk 2% of portfolio per trade
         "MIN_IMPORTANCE": 1,       # Minimum level importance to consider
-        "TIMEFRAMES": ['1d', '4h', '1h', '15m', '5m'],  # Timeframes to analyze
-        "PRICE_THRESHOLD": 0.5,    # Price threshold for merging levels
+        "TIMEFRAMES": ['1d', '4h', '1h', '15m'],  # Timeframes to analyze
         "RECALC_FREQUENCY": "daily",  # How often to recalculate: 'daily', 'weekly', 'once'
         "ENTRY_THRESHOLD": 0.05,   # 5% tolerance for entry (price within 5% of level)
         "EXIT_THRESHOLD": 0.1,    # 2% tolerance for TP/SL exits
@@ -228,8 +226,31 @@ class BaseKeyLevelsStrategy(Strategy):
         self._save_levels_history(levels_path)
     
     def on_abrupt_closing(self):
-        """Called on crash or manual stop."""
+        """Called on crash or manual stop - closes all positions and calculates final PnL."""
+        ticker = self.parameters["Ticker"]
+        position = self.get_position(ticker)
+        
+        # Close any open positions at current price
+        if position is not None and position.quantity != 0:
+            current_price = self.get_last_price(ticker)
+            self.log_message(f"[{self.get_strategy_name()}] Closing open position at end of simulation @ ${current_price:.2f}")
+            
+            # Close in tracker
+            if self.current_trade_id:
+                self.trade_tracker.close_trade(
+                    trade_id=self.current_trade_id,
+                    exit_date=self.get_datetime(),
+                    exit_price=current_price,
+                    reason="END_SIM"
+                )
+            
+            # Close actual position
+            self._close_all_positions()
+        
+        # Save trades
         self.after_market_closes()
+        
+        # Print summary
         if self.trade_tracker.trades:
             self.trade_tracker.print_summary()
     
@@ -477,7 +498,7 @@ class BaseKeyLevelsStrategy(Strategy):
             return False
     
     def _load_key_levels(self, as_of_datetime: datetime):
-        """Load key levels using KeyLevels class."""
+        """Load key levels using analyze() from key_levels package."""
         ticker = self.parameters["Ticker"].symbol
         
         # Create cache key
@@ -491,16 +512,20 @@ class BaseKeyLevelsStrategy(Strategy):
             self.resistance_levels = cached['resistance']
             return
         
-        # Fetch fresh levels
+        # Map lowercase timeframes to resolution format expected by analyze()
+        resolution_map = {'1d': '1D', '4h': '4H', '1h': '1H', '15m': '15m', '5m': '5m'}
+        resolutions = [resolution_map.get(tf, tf) for tf in self.timeframes]
+        
+        # Fetch fresh levels via analyze()
         try:
-            kl = KeyLevels(
+            result = analyze(
                 ticker=ticker,
+                resolutions=resolutions,
                 use_alpaca=False,
                 as_of_date=as_of_datetime
             )
             
-            kl.find_all_key_levels(timeframes=self.timeframes)
-            self.merged_levels = kl.get_merged_levels(price_threshold=self.price_threshold)
+            self.merged_levels = result.merged_levels
             
             if self.merged_levels is not None and not self.merged_levels.empty:
                 # Filter by importance
