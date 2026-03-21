@@ -52,7 +52,7 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
 
     parameters = {
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
-        "RISK_PERCENT": 0.02,          # Risk 2% per trade
+        "RISK_PERCENT": 0.1,          # Risk 10% per trade
         "MIN_IMPORTANCE": 3,           # Minimum importance for S/R levels
         "TIMEFRAMES": ['1d', '4h', '1h', '15m', '5m'],  # kept for base compat
         "PRICE_THRESHOLD": 0.5,        # Threshold for merging S/R levels
@@ -237,14 +237,16 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
             )
 
             # Log the generated key levels out perfectly as the user requested
-            self.log_message(f"\n{'='*60}\n📡 KEY LEVELS GENERATED FOR {current_date}\n{'='*60}")
+            msg = f"\n{'='*60}\n📡 KEY LEVELS GENERATED FOR {current_date}\n{'='*60}\n"
             if not self.support_levels.empty:
-                self.log_message("🟢 SUPPORT LEVELS:\n" + self.support_levels.to_string())
+                msg += f"🟢 SUPPORT LEVELS:\n{self.support_levels.to_string()}\n"
             if not self.resistance_levels.empty:
-                self.log_message("\n🔴 RESISTANCE LEVELS:\n" + self.resistance_levels.to_string())
+                msg += f"\n🔴 RESISTANCE LEVELS:\n{self.resistance_levels.to_string()}\n"
             if not self.fib_trade_setups.empty:
-                self.log_message("\n🌀 FIBONACCI SETUPS:\n" + self.fib_trade_setups.to_string())
-            self.log_message(f"{'='*60}\n")
+                msg += f"\n🌀 FIBONACCI SETUPS:\n{self.fib_trade_setups.to_string()}\n"
+            msg += f"{'='*60}\n"
+            print(msg)
+            self.log_message(msg)
             
         except Exception as e:
             self.log_message(f"[{self.get_strategy_name()}] Analysis error: {e}")
@@ -831,8 +833,8 @@ def run_backtest(
 
 if __name__ == "__main__":
     run_backtest(
-        ticker="ANNA",
-        start_date=datetime(2026, 3, 1),
+        ticker="LYFT",
+        start_date=datetime(2026, 1, 1),
         end_date=datetime(2026, 3, 20),
         budget=10000,
         min_importance=2,

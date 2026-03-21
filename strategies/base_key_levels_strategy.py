@@ -145,6 +145,11 @@ class BaseKeyLevelsStrategy(Strategy):
         current_datetime = self.get_datetime()
         current_date = current_datetime.date()
         
+        # Explicit EOD safety constraint: Cancel pending limit orders 5m before close
+        # to guarantee no overnight gap executions corrupt the R:R ratios
+        if current_datetime.hour == 15 and current_datetime.minute >= 55:
+            self.cancel_open_orders()
+            
         # Check if we need to reload levels
         if self._should_reload_levels(current_date):
             self._load_key_levels(current_datetime)
@@ -233,6 +238,14 @@ class BaseKeyLevelsStrategy(Strategy):
         levels_path = os.path.join(output_dir, f"{self._output_filename}_levels.json")
         self._save_levels_history(levels_path)
     
+    def on_strategy_end(self):
+        """Called natively by Lumibot at the end of the simulation."""
+        # Only liquidate automatically if we are in a backtest and reaching the simulated end
+        if getattr(self, "backtesting_end", None) is not None:
+            self.log_message(f"\n{'='*60}\n🏁 SIMULATION COMPLETE. LIQUIDATING FOR FINAL PROFIT.\n{'='*60}")
+            print(f"\n{'='*60}\n🏁 SIMULATION COMPLETE. LIQUIDATING FOR FINAL PROFIT.\n{'='*60}")
+            self.on_abrupt_closing()
+
     def on_abrupt_closing(self):
         """Called on crash or manual stop - closes all positions and calculates final PnL."""
         ticker = self.parameters["Ticker"]
