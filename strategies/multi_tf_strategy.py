@@ -12,12 +12,14 @@ Data source: analyze(ticker, resolutions=['1D', '4H', '15m'])
 """
 
 import pandas as pd
+import numpy as np
 import sys
 import os
 import io
 import contextlib
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+import yfinance as yf
 
 from lumibot.backtesting import YahooDataBacktesting
 from lumibot.entities import Asset
@@ -234,6 +236,16 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
                 f"{len(self.fib_trade_setups)} fib setups"
             )
 
+            # Log the generated key levels out perfectly as the user requested
+            self.log_message(f"\n{'='*60}\n📡 KEY LEVELS GENERATED FOR {current_date}\n{'='*60}")
+            if not self.support_levels.empty:
+                self.log_message("🟢 SUPPORT LEVELS:\n" + self.support_levels.to_string())
+            if not self.resistance_levels.empty:
+                self.log_message("\n🔴 RESISTANCE LEVELS:\n" + self.resistance_levels.to_string())
+            if not self.fib_trade_setups.empty:
+                self.log_message("\n🌀 FIBONACCI SETUPS:\n" + self.fib_trade_setups.to_string())
+            self.log_message(f"{'='*60}\n")
+            
         except Exception as e:
             self.log_message(f"[{self.get_strategy_name()}] Analysis error: {e}")
             # Keep previous levels if available
@@ -780,10 +792,28 @@ def run_backtest(
     print(f"Running Multi-TF Key Levels (v2) backtest for {ticker}")
     print(f"Period: {start_date.date()} to {end_date.date()}")
 
+    # Fetch explicit Intraday data for Lumibot to ensure a 5-minute trading iteration!
+    print(f"Downloading 5-minute Intraday data for {ticker}...")
+    df = yf.download(ticker, start=start_date, end=end_date, interval="5m", progress=False)
+    
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+        
+    df.rename(columns={
+        "Open": "open", 
+        "High": "high", 
+        "Low": "low", 
+        "Close": "close", 
+        "Volume": "volume"
+    }, inplace=True)
+    
+    pandas_data = {Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK): df}
+    
     MultiTimeframeKeyLevelsStrategy.backtest(
         YahooDataBacktesting,
         start_date,
         end_date,
+        pandas_data=pandas_data, # Explicit inject of 5-m frequency
         budget=budget,
         parameters={
             "Ticker": Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK),
@@ -801,9 +831,9 @@ def run_backtest(
 
 if __name__ == "__main__":
     run_backtest(
-        ticker="PLTR",
+        ticker="ANNA",
         start_date=datetime(2026, 3, 1),
-        end_date=datetime(2026, 3, 21),
+        end_date=datetime(2026, 3, 20),
         budget=10000,
         min_importance=2,
         min_risk_reward=1.5,

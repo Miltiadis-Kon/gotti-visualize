@@ -210,6 +210,9 @@ class BaseKeyLevelsStrategy(Strategy):
         Saves trades to file automatically.
         Uses filename generated at initialization (real system datetime).
         """
+        # Cancel all pending entry orders to prevent overnight price gaps from triggering bad R:R fills!
+        self.cancel_open_orders()
+        
         # Save trade tracker to class-level
         BaseKeyLevelsStrategy._last_trade_tracker = self.trade_tracker
         
