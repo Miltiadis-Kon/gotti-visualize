@@ -36,7 +36,7 @@ from typing import Optional, Dict, List
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from strategies.key_levels.fibonacci_levels import FIBONACCI_LEVELS, FIB_LEVEL_COLUMNS
+from .fibonacci_levels import FIBONACCI_LEVELS, FIB_LEVEL_COLUMNS
 
 
 # ── Fibonacci color palette ──────────────────────────────────────────────────
@@ -460,7 +460,7 @@ def plot_ticker(ticker: str,
     -------
     go.Figure
     """
-    from strategies.key_levels.analyzer import quick_analyze
+    from .analyzer import quick_analyze
     result = quick_analyze(ticker, resolution=resolution, days_back=days_back)
     return plot_analysis(result, resolution=resolution, **kwargs)
 

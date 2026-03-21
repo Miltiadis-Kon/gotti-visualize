@@ -8,7 +8,7 @@ This is the core repository that includes all trading strategies, backtesting, s
 
 ### To use run the following commands
 
-```python
+```bash
 pip install --requirements.txt
 streamlit run ./main.py
 ```

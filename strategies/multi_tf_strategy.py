@@ -603,6 +603,164 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
         """Calculate SHORT SL price (threshold% above resistance)."""
         return resistance_price * (1 + self.sl_threshold)
 
+    def _handle_entry(self, current_price: float):
+        """
+        Override to enforce correct Risk:Reward via Limit Orders and accurately
+        match Lumibot orders to Trade ID to fix mismatch logging bugs.
+        """
+        if self.support_levels is None or self.resistance_levels is None:
+            return
+        
+        signal = self.get_entry_signal(
+            current_price,
+            self.support_levels,
+            self.resistance_levels
+        )
+        if signal is None:
+            return
+            
+        trade_type = signal.get('trade_type', 'BUY')
+        entry_price = signal.get('entry_price', current_price)
+        take_profit = signal['take_profit']
+        stop_loss = signal['stop_loss']
+        support_level = signal['support_level']
+        resistance_level = signal['resistance_level']
+        
+        entry_level = support_level if trade_type == 'BUY' else resistance_level
+        if self._is_level_already_entered(entry_level, trade_type):
+            return
+            
+        quantity = signal.get('quantity')
+        if quantity is None:
+            quantity = self.get_position_sizing(entry_price, stop_loss)
+            
+        if quantity <= 0:
+            return
+            
+        self._mark_level_entered(entry_level, trade_type)
+        self.entry_support = support_level
+        self.target_resistance = resistance_level
+        
+        trade_id = self.trade_tracker.open_trade(
+            date=self.get_datetime(),
+            entry_price=entry_price,
+            quantity=quantity,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            support_level=support_level,
+            resistance_level=resistance_level,
+            trade_type=trade_type
+        )
+        self.current_trade_id = trade_id
+        
+        side = "buy" if trade_type == "BUY" else "sell"
+        order = self.create_order(
+            asset=self.parameters["Ticker"],
+            quantity=quantity,
+            side=side,
+            limit_price=entry_price,
+            secondary_limit_price=take_profit,
+            secondary_stop_price=stop_loss,
+            order_class="bracket",
+        )
+        self.submit_order(order)
+        
+        if not hasattr(self, 'active_trade_map'):
+            self.active_trade_map = {}
+        self.active_trade_map[order.identifier] = trade_id
+        if getattr(order, 'child_orders', None):
+            for child in order.child_orders:
+                self.active_trade_map[child.identifier] = trade_id
+    def on_filled_order(self, position, order, price, quantity, multiplier):
+        """
+        Handle filled orders with perfect logging for Entry/Exit, TP, SL, and Fibonacci levels.
+        Fixes base class bug with SHORT trades missing/closing immediately.
+        """
+        if not hasattr(self, 'active_trade_map'):
+            self.active_trade_map = {}
+
+        # Safe extraction of the correct trade ID
+        mapped_trade_id = self.active_trade_map.get(order.identifier, self.current_trade_id)
+        trade = self.trade_tracker.get_trade(mapped_trade_id)
+        if not trade:
+            return
+
+        is_entry = False
+        is_exit = False
+        
+        if trade.trade_type == "BUY":
+            if order.side == "buy":
+                is_entry = True
+            elif order.side == "sell":
+                is_exit = True
+        elif trade.trade_type == "SELL":
+            if order.side == "sell":
+                is_entry = True
+            elif order.side == "buy":
+                is_exit = True
+
+        current_time = self.get_datetime().strftime("%Y-%m-%d %H:%M")
+
+        if is_entry:
+            msg = (
+                f"\n{'='*60}\n"
+                f"🚀 [ENTRY {mapped_trade_id} FILLED] {current_time} | {trade.trade_type}\n"
+                f"   Asset:        {self.parameters['Ticker'].symbol}\n"
+                f"   Quantity:     {quantity} @ ${price:.2f}\n"
+                f"   Take Profit:  ${trade.take_profit:.2f}\n"
+                f"   Stop Loss:    ${trade.stop_loss:.2f}\n"
+                f"   Fib Levels:   Low ${trade.support_level:.2f} - High ${trade.resistance_level:.2f}\n"
+                f"{'='*60}\n"
+            )
+            print(msg)
+            self.log_message(msg)
+
+        elif is_exit:
+            exit_reason = self._determine_exit_reason(price)
+            closed_trade = self.trade_tracker.close_trade(
+                trade_id=mapped_trade_id,
+                date=self.get_datetime(),
+                exit_price=price,
+                exit_reason=exit_reason
+            )
+            
+            pnl_str = f"+${closed_trade.pnl:.2f}" if closed_trade.pnl >= 0 else f"-${abs(closed_trade.pnl):.2f}"
+            icon = "✅" if closed_trade.pnl > 0 else "❌"
+            
+            msg = (
+                f"\n{'='*60}\n"
+                f"{icon} [EXIT OF ENTRY {mapped_trade_id} FILLED] {current_time} | {trade.trade_type}\n"
+                f"   Reason:       {exit_reason}\n"
+                f"   Quantity:     {quantity} @ ${price:.2f}\n"
+                f"   Realized P&L: {pnl_str}\n"
+                f"   Take Profit:  ${trade.take_profit:.2f}\n"
+                f"   Stop Loss:    ${trade.stop_loss:.2f}\n"
+                f"{'='*60}\n"
+            )
+            print(msg)
+            self.log_message(msg)
+            
+            if mapped_trade_id == self.current_trade_id:
+                self.current_trade_id = None
+            self.entry_support = None
+            self.target_resistance = None
+
+    def _determine_exit_reason(self, exit_price: float) -> str:
+        """Determine exit reason accurately for both LONG and SHORT."""
+        trade = self.trade_tracker.get_trade(self.current_trade_id)
+        if trade:
+            if trade.trade_type == "BUY":
+                if exit_price >= trade.take_profit * 0.99:
+                    return "TP"
+                elif exit_price <= trade.stop_loss * 1.01:
+                    return "SL"
+            else: # SELL
+                if exit_price <= trade.take_profit * 1.01:
+                    return "TP"
+                elif exit_price >= trade.stop_loss * 0.99:
+                    return "SL"
+        return "MANUAL"
+
 
 def run_backtest(
     ticker: str = "NVDA",
@@ -610,7 +768,8 @@ def run_backtest(
     end_date: datetime = None,
     budget: float = 10000,
     min_importance: int = 3,
-    min_risk_reward: float = 1.5
+    min_risk_reward: float = 1.5,
+    save_files: bool = False
 ):
     """Run backtest of Multi-Timeframe Key Levels Strategy."""
     if start_date is None:
@@ -630,16 +789,23 @@ def run_backtest(
             "Ticker": Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK),
             "MIN_IMPORTANCE": min_importance,
             "MIN_RISK_REWARD": min_risk_reward,
-        }
+            "SAVE_FILES": save_files,
+        },
+        save_logfile=save_files,
+        save_tearsheet=save_files,
+        show_plot=save_files,
+        show_tearsheet=save_files,
+        save_stats_file=save_files
     )
 
 
 if __name__ == "__main__":
     run_backtest(
         ticker="PLTR",
-        start_date=datetime(2025, 12, 1),
-        end_date=datetime(2025, 12, 24),
+        start_date=datetime(2026, 3, 1),
+        end_date=datetime(2026, 3, 21),
         budget=10000,
         min_importance=2,
-        min_risk_reward=1.5
+        min_risk_reward=1.5,
+        save_files=False
     )

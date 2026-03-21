@@ -21,8 +21,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from dataclasses import dataclass
 
-from strategies.key_levels.key_levels import find_key_levels, merge_key_levels, KeyLevelDetector
-from strategies.key_levels.fibonacci_levels import find_fibonacci_levels, get_fibonacci_trade_setups, FibonacciDetector
+from .key_levels import find_key_levels, merge_key_levels, KeyLevelDetector
+from .fibonacci_levels import find_fibonacci_levels, get_fibonacci_trade_setups, FibonacciDetector
 
 
 # Resolution to interval mapping for data fetching

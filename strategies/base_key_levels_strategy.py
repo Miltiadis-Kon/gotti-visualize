@@ -14,6 +14,8 @@ Child strategies should implement:
 - Strategy-specific parameters
 """
 
+from math import ceil
+from math import floor
 import pandas as pd
 import sys
 import os
@@ -211,6 +213,9 @@ class BaseKeyLevelsStrategy(Strategy):
         # Save trade tracker to class-level
         BaseKeyLevelsStrategy._last_trade_tracker = self.trade_tracker
         
+        if not self.parameters.get("SAVE_FILES", True):
+            return
+        
         output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
         os.makedirs(output_dir, exist_ok=True)
         
@@ -349,19 +354,15 @@ class BaseKeyLevelsStrategy(Strategy):
         # Calculate position size if not provided
         quantity = signal.get('quantity')
         if quantity is None:
-            quantity = self.get_position_sizing(entry_price, stop_loss, trade_type)
-        
+            quantity = self.get_position_sizing(entry_price, stop_loss)
         if quantity <= 0:
             self.log_message("Insufficient funds for trade")
             return
-        
         # Mark this level as entered
         self._mark_level_entered(entry_level, trade_type)
-        
         # Store trade info
         self.entry_support = support_level
         self.target_resistance = resistance_level
-        
         # Record trade in tracker
         self.current_trade_id = self.trade_tracker.open_trade(
             date=self.get_datetime(),
@@ -459,29 +460,17 @@ class BaseKeyLevelsStrategy(Strategy):
                     return "SL"
         return "MANUAL"
     
-    def get_position_sizing(self, entry_price: float, stop_loss: float, trade_type: str = "BUY") -> int:
-        """
-        Calculate position size based on risk percentage.
-        Works for both LONG (BUY) and SHORT (SELL) positions.
-        
-        Risk = |Entry - Stop Loss| * Quantity
-        Quantity = (Portfolio Value * Risk%) / |Entry - Stop Loss|
-        """
-        portfolio_value = self.get_portfolio_value()
-        risk_amount = portfolio_value * self.risk_percent
+    def get_position_sizing(self, entry_price: float, stop_loss: float) -> int:
+        # 1. qty = risk amount / (entry + abs(entry - stop loss))
+        risk_budget = self.get_portfolio_value() * self.risk_percent 
         risk_per_share = abs(entry_price - stop_loss)
-        
-        if risk_per_share <= 0:
+        total_cost_per_share = entry_price + risk_per_share
+        if total_cost_per_share <= 0:
             return 0
-        
-        quantity = int(risk_amount / risk_per_share)
-        
-        # Ensure we can afford the position
-        max_affordable = int(portfolio_value * 0.95 / entry_price)
-        quantity = min(quantity, max_affordable)
-        
-        return max(0, quantity)
-    
+        quantity = floor(risk_budget / total_cost_per_share)
+        print(f"Budget: {risk_budget} | Cost/Share: {total_cost_per_share} | Qty: {quantity}")
+        return quantity
+
     def _should_reload_levels(self, current_date) -> bool:
         """Check if we need to reload key levels."""
         if self.last_levels_date is None:
@@ -599,4 +588,5 @@ class BaseKeyLevelsStrategy(Strategy):
             json.dump(data, f, indent=2)
         
         self.log_message(f"Levels history saved: {len(self._levels_history)} days to {os.path.basename(filepath)}")
+
 
