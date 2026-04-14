@@ -530,8 +530,11 @@
       <div class="err-sub" id="errSub">Make sure the API server is running on port 8000</div>
     </div>
 
+    <!-- Background zones layer for Fibonacci, drawn behind chart -->
+    <div id="fibZonesWrap" style="position:absolute; top:0; left:0; right:60px; bottom:26px; pointer-events:none; z-index:1; overflow:hidden;"></div>
+
     <!-- Chart canvas -->
-    <div id="tvChart"></div>
+    <div id="tvChart" style="position:relative; z-index:2; width:100%; height:100%;"></div>
   </div>
 
   <!-- ═══════ SIDE PANEL ═══════ -->
@@ -578,6 +581,7 @@ const lineRefs     = { resistance: [], support: [], fibonacci: [] };
 
 // Per-fib tracking: key = patternId, value = { lines: [], hidden: bool }
 const fibPatterns = {};
+const activeZones = []; // list of { el, p1, p2, hidden }
 
 /* ═══════════════════════════════════════════════════════════
    CHART SETUP
@@ -586,7 +590,7 @@ function initChart() {
   const container = document.getElementById('tvChart');
   chart = LightweightCharts.createChart(container, {
     layout: {
-      background: { type: 'solid', color: '#020617' },
+      background: { type: 'solid', color: 'transparent' },
       textColor:  '#64748B',
       fontSize:   11,
       fontFamily: "'Fira Code', monospace",
@@ -720,6 +724,10 @@ function clearAllLines() {
     lineRefs[layer] = [];
   });
   Object.keys(fibPatterns).forEach(k => delete fibPatterns[k]);
+
+  const wrap = document.getElementById('fibZonesWrap');
+  if (wrap) wrap.innerHTML = '';
+  activeZones.length = 0;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -861,34 +869,59 @@ function drawLevels(levels, fibSetups) {
     const key   = setup.patternId || `fib-${idx}`;
     const lines = [];
 
-    // Key colors per fib ratio
-    const ratioColor = {
-      '0.000':'rgba(245,158,11,0.30)',
-      '0.236':'rgba(245,158,11,0.40)',
-      '0.382':'rgba(245,158,11,0.55)',
-      '0.500':'rgba(245,158,11,0.65)',
-      '0.618':'rgba(34,197,94,0.70)',   // golden ratio — highlight green
-      '0.786':'rgba(245,158,11,0.50)',
-      '1.000':'rgba(245,158,11,0.30)',
-    };
-    const ratioWidth = {
-      '0.618': 2, '0.500': 1.5, '0.382': 1.5,
+    // Key colors per fib ratio matching TradingView
+    const FIB_COLORS = {
+      '0.000': 'rgba(120, 123, 134, 1.0)', // Gray
+      '0.236': 'rgba(244, 67, 54, 1.0)',   // Red
+      '0.382': 'rgba(129, 199, 132, 1.0)', // Light Green
+      '0.500': 'rgba(76, 175, 80, 1.0)',   // Green
+      '0.618': 'rgba(0, 150, 136, 1.0)',   // Teal
+      '0.786': 'rgba(100, 181, 246, 1.0)', // Blue
+      '1.000': 'rgba(120, 123, 134, 1.0)', // Gray
     };
 
     Object.entries(setup.levels).forEach(([ratio, price]) => {
-      const line = candleSeries.createPriceLine({
+      const lineOptions = {
         price,
-        color:            ratioColor[ratio] || 'rgba(245,158,11,0.4)',
-        lineWidth:        ratioWidth[ratio] || 1,
-        lineStyle:        ratio === '0.618' ? LINE_STYLE.Solid : LINE_STYLE.Dashed,
-        axisLabelVisible: ratio === '0.618',
-        title:            ratio === '0.618' ? `${setup.resolution} Entry` : '',
-      });
-      lines.push(line);
-      lineRefs.fibonacci.push({ line, data:{ price, ratio } });
+        color:            FIB_COLORS[ratio] || 'rgba(120, 123, 134, 1.0)',
+        lineWidth:        1,
+        lineStyle:        LINE_STYLE.Solid,
+        axisLabelVisible: false,
+        title:            `${ratio}(${price.toFixed(2)})`,
+      };
+      
+      const line = candleSeries.createPriceLine(lineOptions);
+      lines.push({ line, options: lineOptions });
+      lineRefs.fibonacci.push({ line, data: { price, ratio, options: lineOptions } });
     });
 
-    fibPatterns[key] = { lines, hidden: false };
+    const ZONE_DEF = [
+      { t: '0.000', b: '0.236', c: 'rgba(244, 67, 54, 0.15)' },
+      { t: '0.236', b: '0.382', c: 'rgba(129, 199, 132, 0.15)' },
+      { t: '0.382', b: '0.500', c: 'rgba(76, 175, 80, 0.15)' },
+      { t: '0.500', b: '0.618', c: 'rgba(0, 150, 136, 0.15)' },
+      { t: '0.618', b: '0.786', c: 'rgba(100, 181, 246, 0.15)' },
+      { t: '0.786', b: '1.000', c: 'rgba(120, 123, 134, 0.15)' },
+      { t: '1.000', b: '1.618', c: 'rgba(33, 150, 243, 0.15)' },
+    ];
+
+    const zonesData = [];
+    ZONE_DEF.forEach(zd => {
+      if (setup.levels[zd.t] !== undefined && setup.levels[zd.b] !== undefined) {
+        const el = document.createElement('div');
+        el.style.position = 'absolute';
+        el.style.left = '0';
+        el.style.right = '0';
+        el.style.backgroundColor = zd.c;
+        document.getElementById('fibZonesWrap').appendChild(el);
+        
+        const zoneObj = { el, p1: setup.levels[zd.t], p2: setup.levels[zd.b], hidden: false };
+        zonesData.push(zoneObj);
+        activeZones.push(zoneObj);
+      }
+    });
+
+    fibPatterns[key] = { lines, zones: zonesData, hidden: false };
   });
 }
 
@@ -905,19 +938,10 @@ function applyLayerVisibility(layer, visible) {
         const a = 0.35 + data.importance * 0.12;
         line.applyOptions({ color:`rgba(34,197,94,${a})`, lineWidth:impToWidth(data.importance) });
       } else {
-        const ratioColor = {
-          '0.000':'rgba(245,158,11,0.30)', '0.236':'rgba(245,158,11,0.40)',
-          '0.382':'rgba(245,158,11,0.55)', '0.500':'rgba(245,158,11,0.65)',
-          '0.618':'rgba(34,197,94,0.70)',  '0.786':'rgba(245,158,11,0.50)',
-          '1.000':'rgba(245,158,11,0.30)',
-        };
-        line.applyOptions({
-          color: ratioColor[data.ratio] || 'rgba(245,158,11,0.4)',
-          lineWidth: data.ratio === '0.618' ? 2 : data.ratio === '0.500' || data.ratio === '0.382' ? 1.5 : 1,
-        });
+        line.applyOptions(data.options);
       }
     } else {
-      line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0 });
+      line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0, title: '', axisLabelVisible: false });
     }
   });
 }
@@ -943,17 +967,22 @@ function toggleFibPattern(patternKey) {
 
   pat.hidden = !pat.hidden;
 
-  pat.lines.forEach(line => {
+  pat.lines.forEach(item => {
     if (pat.hidden) {
-      line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0 });
+      item.line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0, title: '', axisLabelVisible: false });
     } else {
       // Only restore if the entire fibonacci layer is visible
       if (layerVisible.fibonacci) {
-        // Can't know the ratio from line alone — just restore generic gold
-        line.applyOptions({ color:'rgba(245,158,11,0.45)', lineWidth:1 });
+        item.line.applyOptions(item.options);
       }
     }
   });
+
+  if (pat.zones) {
+    pat.zones.forEach(z => {
+      z.hidden = pat.hidden;
+    });
+  }
 
   // Update card UI
   const card = document.getElementById(`fibcard-${CSS.escape(patternKey)}`);
@@ -1100,6 +1129,46 @@ initChart();
 
 // Auto-load NVDA on startup
 loadChart();
+
+// ═════ FIB ZONE RENDERING LOOP ═════
+function syncZonesLoop() {
+  requestAnimationFrame(syncZonesLoop);
+  if (!chart || !candleSeries) return;
+
+  const wrap = document.getElementById('fibZonesWrap');
+  if (wrap) {
+    try {
+      // Dynamically fit the grid bounds avoiding price scales
+      const scaleW = chart.priceScale('right').width();
+      if (scaleW > 0) wrap.style.right = scaleW + 'px';
+    } catch(e) {}
+  }
+
+  activeZones.forEach(z => {
+    // Hidden pattern or hidden fibonacci overlay entirely
+    const isHidden = z.hidden || !layerVisible.fibonacci;
+    if (isHidden) {
+      z.el.style.display = 'none';
+      return;
+    }
+
+    const y1 = candleSeries.priceToCoordinate(z.p1);
+    const y2 = candleSeries.priceToCoordinate(z.p2);
+    
+    if (y1 === null || y2 === null) {
+      z.el.style.display = 'none';
+      return;
+    }
+
+    const top = Math.min(y1, y2);
+    const height = Math.abs(y1 - y2);
+    
+    z.el.style.display = 'block';
+    z.el.style.top = top + 'px';
+    z.el.style.height = height + 'px';
+  });
+}
+syncZonesLoop();
 </script>
 </body>
 </html>
