@@ -338,8 +338,9 @@
       display:flex; align-items:center; gap:9px;
       padding:7px 8px; border-radius:var(--r-sm);
       margin-bottom:3px;
-      transition:var(--tr); cursor:default;
+      transition:var(--tr); cursor:pointer;
     }
+    .lvrow.lv-hidden { opacity:.35; filter:grayscale(80%); }
     .lvrow:hover{background:rgba(255,255,255,.03);}
     .lv-bar { width:3px; height:26px; border-radius:2px; flex-shrink:0; }
     .lv-bar.r { background:var(--red);   box-shadow:0 0 8px rgba(239,68,68,.3); }
@@ -837,7 +838,8 @@ function impToWidth(imp) {
 
 function drawLevels(levels, fibSetups) {
   // Resistance
-  levels.filter(l => l.type === 'resistance').forEach(l => {
+  levels.filter(l => l.type === 'resistance').forEach((l, i) => {
+    l.id = `res-${i}`;
     const alpha = 0.35 + l.importance * 0.12;
     const line  = candleSeries.createPriceLine({
       price:            l.price,
@@ -847,11 +849,12 @@ function drawLevels(levels, fibSetups) {
       axisLabelVisible: true,
       title:            `R $${l.price.toFixed(2)}  ×${l.touchCount}`,
     });
-    lineRefs.resistance.push({ line, data: l });
+    lineRefs.resistance.push({ line, data: l, hidden: false });
   });
 
   // Support
-  levels.filter(l => l.type === 'support').forEach(l => {
+  levels.filter(l => l.type === 'support').forEach((l, i) => {
+    l.id = `sup-${i}`;
     const alpha = 0.35 + l.importance * 0.12;
     const line  = candleSeries.createPriceLine({
       price:            l.price,
@@ -861,7 +864,7 @@ function drawLevels(levels, fibSetups) {
       axisLabelVisible: true,
       title:            `S $${l.price.toFixed(2)}  ×${l.touchCount}`,
     });
-    lineRefs.support.push({ line, data: l });
+    lineRefs.support.push({ line, data: l, hidden: false });
   });
 
   // Fibonacci — draw each setup's lines grouped
@@ -886,7 +889,7 @@ function drawLevels(levels, fibSetups) {
         color:            FIB_COLORS[ratio] || 'rgba(120, 123, 134, 1.0)',
         lineWidth:        1,
         lineStyle:        LINE_STYLE.Solid,
-        axisLabelVisible: false,
+        axisLabelVisible: true,
         title:            `${ratio}(${price.toFixed(2)})`,
       };
       
@@ -929,14 +932,17 @@ function drawLevels(levels, fibSetups) {
    TOGGLE LAYERS
 ═══════════════════════════════════════════════════════════ */
 function applyLayerVisibility(layer, visible) {
-  lineRefs[layer].forEach(({ line, data }) => {
-    if (visible) {
+  lineRefs[layer].forEach(ref => {
+    const { line, data } = ref;
+    const itemHidden = ref.hidden || false;
+
+    if (visible && !itemHidden) {
       if (layer === 'resistance') {
         const a = 0.35 + data.importance * 0.12;
-        line.applyOptions({ color:`rgba(239,68,68,${a})`, lineWidth:impToWidth(data.importance) });
+        line.applyOptions({ color:`rgba(239,68,68,${a})`, lineWidth:impToWidth(data.importance), axisLabelVisible: true, title: `R $${data.price.toFixed(2)}  ×${data.touchCount}` });
       } else if (layer === 'support') {
         const a = 0.35 + data.importance * 0.12;
-        line.applyOptions({ color:`rgba(34,197,94,${a})`, lineWidth:impToWidth(data.importance) });
+        line.applyOptions({ color:`rgba(34,197,94,${a})`, lineWidth:impToWidth(data.importance), axisLabelVisible: true, title: `S $${data.price.toFixed(2)}  ×${data.touchCount}` });
       } else {
         line.applyOptions(data.options);
       }
@@ -956,6 +962,34 @@ function toggleLayer(layer) {
   btn.classList.toggle(clsMap[layer], vis);
 
   applyLayerVisibility(layer, vis);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOGGLE INDIVIDUAL ROWS (S/R)
+═══════════════════════════════════════════════════════════ */
+function toggleSRLevel(layer, id) {
+  const ref = lineRefs[layer].find(r => r.data.id === id);
+  if (!ref) return;
+  ref.hidden = !ref.hidden;
+  
+  if (ref.hidden) {
+    ref.line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0, title: '', axisLabelVisible: false });
+  } else {
+    if (layerVisible[layer]) {
+      const a = 0.35 + ref.data.importance * 0.12;
+      const color = layer === 'resistance' ? `rgba(239,68,68,${a})` : `rgba(34,197,94,${a})`;
+      ref.line.applyOptions({ 
+        color, 
+        lineWidth:impToWidth(ref.data.importance), 
+        axisLabelVisible: true, 
+        title: `${layer==='resistance'?'R':'S'} $${ref.data.price.toFixed(2)}  ×${ref.data.touchCount}` 
+      });
+    }
+  }
+
+  // Update UI row opacity
+  const row = document.getElementById(`row-${id}`);
+  if (row) row.classList.toggle('lv-hidden', ref.hidden);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1063,8 +1097,9 @@ function levelRowHTML(l, colorKey) {
   const pips = [1,2,3,4,5].map(i =>
     `<div class="pip ${i<=l.importance?'f-'+colorKey:''}"></div>`
   ).join('');
+  const layerStr = colorKey === 'r' ? 'resistance' : 'support';
   return `
-    <div class="lvrow">
+    <div class="lvrow" id="row-${l.id}" onclick="toggleSRLevel('${layerStr}', '${l.id}')" title="Click to show/hide this level">
       <div class="lv-bar ${colorKey}"></div>
       <div class="lv-info">
         <div class="lv-price">$${l.price.toFixed(2)}</div>
