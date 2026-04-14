@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Advanced Key Levels Chart</title>
+  <meta name="description" content="Advanced stock charting: candlesticks, support/resistance, fibonacci retracements">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+
+  <style>
+    /* ── DESIGN TOKENS ── */
+    :root {
+      --bg-0:    #020617;
+      --bg-1:    #0F172A;
+      --bg-2:    #1E293B;
+      --bg-3:    #334155;
+      --tx-0:    #F8FAFC;
+      --tx-1:    #CBD5E1;
+      --tx-2:    #94A3B8;
+      --tx-3:    #64748B;
+      --green:   #22C55E;
+      --red:     #EF4444;
+      --gold:    #F59E0B;
+      --cyan:    #06B6D4;
+      --purple:  #A855F7;
+      --border:  rgba(51,65,85,0.7);
+      --r:       10px;
+      --r-sm:    7px;
+      --tr:      all 0.18s cubic-bezier(0.4,0,0.2,1);
+      --mono:    'Fira Code', monospace;
+      --sans:    'Inter', system-ui, sans-serif;
+      --shadow:  0 4px 24px rgba(0,0,0,0.4);
+    }
+    *{margin:0;padding:0;box-sizing:border-box;}
+    html,body{height:100%;overflow:hidden;font-family:var(--sans);background:var(--bg-0);color:var(--tx-0);}
+
+    /* ── HEADER ── */
+    #header {
+      height: 52px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 20px;
+      background: var(--bg-1);
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      z-index: 200;
+      flex-shrink: 0;
+    }
+
+    .logo {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, var(--green), var(--cyan));
+      border-radius: var(--r-sm);
+      display:flex; align-items:center; justify-content:center;
+      flex-shrink: 0;
+    }
+
+    /* Ticker search */
+    #tickerForm {
+      display:flex; align-items:center; gap:6px;
+    }
+    #tickerInput {
+      width: 88px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--tx-0);
+      font-family: var(--mono);
+      font-size: 15px; font-weight: 700;
+      letter-spacing: 1.5px;
+      padding: 5px 10px;
+      text-transform: uppercase;
+      outline: none;
+      transition: var(--tr);
+    }
+    #tickerInput:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(34,197,94,.12); }
+
+    #loadBtn {
+      height: 32px; padding: 0 14px;
+      background: var(--green); color: #050e0a;
+      border: none; border-radius: var(--r-sm);
+      font-family: var(--mono); font-size: 12px; font-weight: 700;
+      letter-spacing: 1px;
+      cursor: pointer; transition: var(--tr);
+      display:flex; align-items:center; gap:5px;
+    }
+    #loadBtn:hover { background: #16a34a; }
+    #loadBtn:active { transform: scale(0.97); }
+    #loadBtn:disabled { background: var(--bg-3); color: var(--tx-3); cursor:not-allowed; }
+
+    /* Ticker info */
+    #tickerInfo {
+      display:flex; align-items:baseline; gap:10px;
+    }
+    #tickerSymbol {
+      font-family: var(--mono); font-size: 18px; font-weight: 700;
+      color: var(--tx-0);
+    }
+    #currentPrice {
+      font-family: var(--mono); font-size: 20px; font-weight: 600;
+      color: var(--green);
+      text-shadow: 0 0 12px rgba(34,197,94,.2);
+    }
+    #priceChange {
+      font-family: var(--mono); font-size: 12px; font-weight: 600;
+      padding: 2px 8px; border-radius: 5px;
+    }
+    #priceChange.up   { background: rgba(34,197,94,.12); color: var(--green); }
+    #priceChange.down { background: rgba(239,68,68,.12);  color: var(--red); }
+
+    #headerRight {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    /* Status badge */
+    #statusBadge {
+      font-family: var(--mono); font-size: 11px;
+      padding: 3px 10px; border-radius: 20px;
+      border: 1px solid var(--border);
+      color: var(--tx-3);
+      display: flex; align-items: center; gap: 5px;
+    }
+    #statusBadge.loading { border-color: var(--cyan); color: var(--cyan); }
+    #statusBadge.ok      { border-color: var(--green); color: var(--green); }
+    #statusBadge.err     { border-color: var(--red); color: var(--red); }
+    .status-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: currentColor;
+    }
+    .status-dot.pulse { animation: pulse-dot 1.4s ease-in-out infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.8)} }
+
+    /* ── CONTROLS BAR ── */
+    #controls {
+      height: 40px;
+      display: flex; align-items: center; gap: 4px;
+      padding: 0 20px;
+      background: var(--bg-1);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .ctrl-sep {
+      width: 1px; height: 22px;
+      background: var(--border);
+      margin: 0 6px;
+    }
+
+    .ctrl-label {
+      font-size: 10px; letter-spacing: 1.2px;
+      text-transform: uppercase; color: var(--tx-3);
+      font-weight: 700; margin-right: 2px;
+    }
+
+    /* Resolution pills */
+    .res-group { display:flex; gap:2px; }
+    .res-btn {
+      height: 26px; padding: 0 10px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: var(--tx-3);
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      cursor: pointer; transition: var(--tr);
+      letter-spacing: .5px;
+    }
+    .res-btn:hover { background: var(--bg-2); color: var(--tx-1); border-color: var(--border); }
+    .res-btn.active {
+      background: rgba(34,197,94,.1);
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    /* Toggle buttons */
+    .tog-btn {
+      height: 26px; padding: 0 10px;
+      display:flex; align-items:center; gap:6px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--tx-2);
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      cursor: pointer; transition: var(--tr);
+      user-select: none;
+    }
+    .tog-btn:hover { background: var(--bg-3); }
+    .tog-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--tx-3); transition: var(--tr);
+    }
+    .tog-btn.active-r { border-color:var(--red);   background:rgba(239,68,68,.08); color:var(--red);   }
+    .tog-btn.active-g { border-color:var(--green); background:rgba(34,197,94,.08); color:var(--green); }
+    .tog-btn.active-f { border-color:var(--gold);  background:rgba(245,158,11,.08);  color:var(--gold);  }
+    .tog-btn.active-r .tog-dot { background:var(--red);   box-shadow:0 0 6px var(--red);   }
+    .tog-btn.active-g .tog-dot { background:var(--green); box-shadow:0 0 6px var(--green); }
+    .tog-btn.active-f .tog-dot { background:var(--gold);  box-shadow:0 0 6px var(--gold);  }
+
+    /* ── MAIN BODY ── */
+    #body {
+      display:flex;
+      height: calc(100vh - 92px);
+    }
+
+    /* ── CHART AREA ── */
+    #chartWrap {
+      flex: 1; position:relative; overflow:hidden;
+      background: var(--bg-0);
+    }
+    #tvChart { width:100%; height:100%; }
+
+    /* Watermark */
+    #watermark {
+      position:absolute; top:14px; left:18px;
+      pointer-events:none; z-index:5;
+    }
+    #wmTicker {
+      font-family:var(--mono); font-size:52px; font-weight:700;
+      color:rgba(248,250,252,.035); line-height:1;
+    }
+    #wmSub {
+      font-family:var(--mono); font-size:12px; letter-spacing:4px;
+      color:rgba(248,250,252,.025); text-transform:uppercase;
+    }
+
+    /* Crosshair tooltip */
+    #xhBox {
+      position:absolute; bottom:14px; left:18px; z-index:10;
+      background:rgba(15,23,42,.9);
+      backdrop-filter: blur(10px);
+      border:1px solid var(--border);
+      border-radius:var(--r-sm);
+      padding:9px 14px;
+      font-family:var(--mono); font-size:12px;
+      display:none; min-width:200px;
+      box-shadow: var(--shadow);
+    }
+    .xh-row { display:flex; justify-content:space-between; gap:14px; margin-bottom:2px; }
+    .xh-lbl { color:var(--tx-3); }
+    .xh-val { color:var(--tx-0); font-weight:600; }
+    .xh-val.up   { color:var(--green); }
+    .xh-val.down { color:var(--red); }
+
+    /* Loading overlay */
+    #loadOverlay {
+      position:absolute; inset:0; z-index:50;
+      background:rgba(2,6,23,.8);
+      backdrop-filter:blur(4px);
+      display:flex; flex-direction:column;
+      align-items:center; justify-content:center;
+      gap:16px;
+      transition: opacity .3s;
+    }
+    #loadOverlay.hidden { opacity:0; pointer-events:none; }
+    .spinner {
+      width:40px; height:40px;
+      border:3px solid rgba(34,197,94,.15);
+      border-top-color:var(--green);
+      border-radius:50%;
+      animation:spin .8s linear infinite;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .load-text { font-family:var(--mono); font-size:13px; color:var(--tx-2); }
+    .load-sub   { font-size:11px; color:var(--tx-3); }
+
+    /* Error overlay */
+    #errBox {
+      position:absolute; inset:0; z-index:50;
+      background:rgba(2,6,23,.85);
+      display:none; flex-direction:column;
+      align-items:center; justify-content:center;
+      gap:10px;
+    }
+    #errBox.show { display:flex; }
+    .err-icon { font-size:36px; }
+    .err-msg { font-family:var(--mono); font-size:14px; color:var(--red); text-align:center; max-width:360px; }
+    .err-sub  { font-size:12px; color:var(--tx-3); text-align:center; max-width:360px; }
+
+    /* ── SIDE PANEL ── */
+    #sidePanel {
+      width: 300px; flex-shrink:0;
+      background:var(--bg-1);
+      border-left:1px solid var(--border);
+      display:flex; flex-direction:column;
+      overflow:hidden;
+    }
+
+    #panelTabs {
+      display:flex;
+      border-bottom:1px solid var(--border);
+      flex-shrink:0;
+    }
+    .ptab {
+      flex:1; padding:9px 0;
+      font-family:var(--mono); font-size:11px; font-weight:700;
+      letter-spacing:.8px; text-transform:uppercase;
+      color:var(--tx-3);
+      cursor:pointer; text-align:center;
+      border-bottom:2px solid transparent;
+      transition:var(--tr);
+    }
+    .ptab:hover { color:var(--tx-1); }
+    .ptab.active-r { color:var(--red);   border-bottom-color:var(--red);   }
+    .ptab.active-g { color:var(--green); border-bottom-color:var(--green); }
+    .ptab.active-f { color:var(--gold);  border-bottom-color:var(--gold);  }
+
+    #panelContent {
+      flex:1; overflow-y:auto;
+      scrollbar-width:thin;
+      scrollbar-color:var(--bg-3) transparent;
+    }
+    #panelContent::-webkit-scrollbar{width:4px;}
+    #panelContent::-webkit-scrollbar-thumb{background:var(--bg-3);border-radius:2px;}
+
+    .panel-section {
+      padding:12px 14px;
+      border-bottom:1px solid var(--border);
+    }
+
+    .psec-title {
+      font-size:10px; text-transform:uppercase; letter-spacing:1.5px;
+      color:var(--tx-3); font-weight:700;
+      display:flex; align-items:center; gap:8px;
+      margin-bottom:10px;
+    }
+    .psec-count {
+      font-family:var(--mono); font-size:10px;
+      background:var(--bg-2); padding:1px 6px; border-radius:4px;
+      color:var(--tx-2);
+    }
+
+    /* Level row */
+    .lvrow {
+      display:flex; align-items:center; gap:9px;
+      padding:7px 8px; border-radius:var(--r-sm);
+      margin-bottom:3px;
+      transition:var(--tr); cursor:default;
+    }
+    .lvrow:hover{background:rgba(255,255,255,.03);}
+    .lv-bar { width:3px; height:26px; border-radius:2px; flex-shrink:0; }
+    .lv-bar.r { background:var(--red);   box-shadow:0 0 8px rgba(239,68,68,.3); }
+    .lv-bar.s { background:var(--green); box-shadow:0 0 8px rgba(34,197,94,.3); }
+    .lv-info { flex:1; }
+    .lv-price { font-family:var(--mono); font-size:13px; font-weight:600; }
+    .lv-meta  { font-size:10px; color:var(--tx-3); margin-top:1px; }
+    .imp-pips { display:flex; gap:2px; }
+    .pip {
+      width:5px; height:5px; border-radius:50%;
+      background:var(--bg-3); transition:var(--tr);
+    }
+    .pip.f-r  { background:var(--red);   box-shadow:0 0 4px rgba(239,68,68,.5); }
+    .pip.f-g  { background:var(--green); box-shadow:0 0 4px rgba(34,197,94,.5); }
+
+    /* Fibonacci card */
+    .fib-card {
+      background:var(--bg-2);
+      border:1px solid var(--border);
+      border-radius:var(--r-sm);
+      margin-bottom:8px;
+      overflow:hidden;
+      transition:var(--tr);
+      cursor:pointer;
+    }
+    .fib-card:hover { border-color: rgba(245,158,11,.5); }
+    .fib-card.fib-hidden { opacity:.35; filter:grayscale(80%); }
+
+    .fib-head {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:9px 12px;
+      border-bottom:1px solid var(--border);
+    }
+    .fib-head-left { display:flex; align-items:center; gap:8px; }
+    .fib-trend {
+      font-family:var(--mono); font-size:10px; font-weight:700;
+      padding:2px 7px; border-radius:4px; text-transform:uppercase;
+    }
+    .fib-trend.up   { background:rgba(34,197,94,.12); color:var(--green); }
+    .fib-trend.down { background:rgba(239,68,68,.12);  color:var(--red); }
+    .fib-res {
+      font-family:var(--mono); font-size:10px;
+      background:var(--bg-3); padding:2px 6px; border-radius:4px; color:var(--tx-2);
+    }
+    .fib-toggle-icon {
+      font-family:var(--mono); font-size:11px; color:var(--tx-3);
+      transition:var(--tr);
+    }
+    .fib-card.fib-hidden .fib-toggle-icon { color:var(--tx-3); }
+    .fib-card:not(.fib-hidden) .fib-toggle-icon { color:var(--gold); }
+
+    .fib-body { padding:10px 12px; }
+    .fib-range { font-family:var(--mono); font-size:11px; color:var(--tx-2); margin-bottom:8px; }
+    .fib-grid {
+      display:grid; grid-template-columns:1fr 1fr;
+      gap:2px 10px;
+    }
+    .fib-row {
+      display:flex; justify-content:space-between;
+      padding:2px 0;
+    }
+    .fib-lbl { font-size:10px; color:var(--tx-3); }
+    .fib-val { font-family:var(--mono); font-size:11px; font-weight:600; color:var(--gold); }
+    .fib-foot {
+      padding:7px 12px;
+      border-top:1px solid var(--border);
+      display:flex; justify-content:space-between;
+      font-family:var(--mono); font-size:10px; color:var(--tx-2);
+    }
+    .fib-rr { color:var(--cyan); font-weight:700; }
+    .fib-entry { color:var(--gold); }
+
+    /* Empty state */
+    .empty-state {
+      padding:32px 16px; text-align:center;
+      color:var(--tx-3); font-size:12px;
+    }
+    .empty-icon { font-size:28px; margin-bottom:8px; opacity:.4; }
+
+    @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+  </style>
+</head>
+<body>
+
+<!-- ═══════ HEADER ═══════ -->
+<div id="header">
+  <!-- Logo -->
+  <div class="logo">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#050e0a" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+  </div>
+
+  <!-- Ticker search -->
+  <form id="tickerForm" onsubmit="return false;">
+    <input id="tickerInput" type="text" value="NVDA" maxlength="10" autocomplete="off" spellcheck="false" placeholder="TICKER">
+    <button id="loadBtn" onclick="loadChart()" type="button">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.46"/></svg>
+      LOAD
+    </button>
+  </form>
+
+  <div class="ctrl-sep" style="height:28px;"></div>
+
+  <!-- Ticker info -->
+  <div id="tickerInfo">
+    <span id="tickerSymbol" style="font-family:var(--mono);font-size:17px;font-weight:700;">—</span>
+    <span id="currentPrice" style="font-family:var(--mono);font-size:18px;font-weight:600;color:var(--green);">—</span>
+    <span id="priceChange" class="up">—</span>
+  </div>
+
+  <div id="headerRight">
+    <div id="statusBadge">
+      <span class="status-dot"></span>
+      <span id="statusText">Ready</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ CONTROLS ═══════ -->
+<div id="controls">
+
+  <!-- Resolution -->
+  <span class="ctrl-label">Timeframe</span>
+  <div class="res-group" id="resGroup">
+    <button class="res-btn active" data-res="5m"  onclick="setResolution('5m')">5m</button>
+    <button class="res-btn"        data-res="15m" onclick="setResolution('15m')">15m</button>
+    <button class="res-btn"        data-res="1h"  onclick="setResolution('1h')">1H</button>
+    <button class="res-btn"        data-res="4h"  onclick="setResolution('4h')">4H</button>
+    <button class="res-btn"        data-res="1d"  onclick="setResolution('1d')">1D</button>
+  </div>
+
+  <div class="ctrl-sep"></div>
+
+  <!-- Overlays -->
+  <span class="ctrl-label">Overlays</span>
+  <button class="tog-btn active-r" id="togR" onclick="toggleLayer('resistance')">
+    <span class="tog-dot"></span>Resistance
+  </button>
+  <button class="tog-btn active-g" id="togS" onclick="toggleLayer('support')">
+    <span class="tog-dot"></span>Support
+  </button>
+  <button class="tog-btn active-f" id="togF" onclick="toggleLayer('fibonacci')">
+    <span class="tog-dot"></span>Fibonacci
+  </button>
+
+  <div class="ctrl-sep"></div>
+
+  <!-- Candle style -->
+  <span class="ctrl-label">Style</span>
+  <button class="tog-btn active-g" id="togCandle" onclick="toggleCandleStyle()">
+    <span class="tog-dot" style="background:var(--green);box-shadow:0 0 6px var(--green);"></span>
+    <span id="candleStyleLbl">Candle</span>
+  </button>
+</div>
+
+<!-- ═══════ BODY ═══════ -->
+<div id="body">
+
+  <!-- Chart -->
+  <div id="chartWrap">
+    <div id="watermark">
+      <div id="wmTicker">NVDA</div>
+      <div id="wmSub">KEY LEVELS ANALYSIS</div>
+    </div>
+
+    <!-- Crosshair OHLCV tooltip -->
+    <div id="xhBox">
+      <div class="xh-row"><span class="xh-lbl">Date</span>  <span class="xh-val" id="xhDate">—</span></div>
+      <div class="xh-row"><span class="xh-lbl">Open</span>  <span class="xh-val" id="xhO">—</span></div>
+      <div class="xh-row"><span class="xh-lbl">High</span>  <span class="xh-val" id="xhH">—</span></div>
+      <div class="xh-row"><span class="xh-lbl">Low</span>   <span class="xh-val" id="xhL">—</span></div>
+      <div class="xh-row"><span class="xh-lbl">Close</span> <span class="xh-val" id="xhC">—</span></div>
+      <div class="xh-row"><span class="xh-lbl">Vol</span>   <span class="xh-val" id="xhV" style="color:var(--tx-2)">—</span></div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loadOverlay">
+      <div class="spinner"></div>
+      <div class="load-text" id="loadText">Initializing...</div>
+      <div class="load-sub" id="loadSub">Connecting to API</div>
+    </div>
+
+    <!-- Error overlay -->
+    <div id="errBox">
+      <div class="err-icon">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      </div>
+      <div class="err-msg" id="errMsg">Failed to load data</div>
+      <div class="err-sub" id="errSub">Make sure the API server is running on port 8000</div>
+    </div>
+
+    <!-- Chart canvas -->
+    <div id="tvChart"></div>
+  </div>
+
+  <!-- ═══════ SIDE PANEL ═══════ -->
+  <div id="sidePanel">
+    <!-- Tabs -->
+    <div id="panelTabs">
+      <div class="ptab active-r" id="tabR" onclick="switchTab('R')">
+        Resistance <span id="cntR" style="opacity:.6;font-size:10px"></span>
+      </div>
+      <div class="ptab" id="tabS" onclick="switchTab('S')">
+        Support <span id="cntS" style="opacity:.6;font-size:10px"></span>
+      </div>
+      <div class="ptab" id="tabF" onclick="switchTab('F')">
+        Fibonacci <span id="cntF" style="opacity:.6;font-size:10px"></span>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div id="panelContent">
+      <div id="panelR" class="panel-section"></div>
+      <div id="panelS" class="panel-section" style="display:none"></div>
+      <div id="panelF" class="panel-section" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════
+   CONFIG
+═══════════════════════════════════════════════════════════ */
+const API = 'http://localhost:8000';
+const LINE_STYLE = LightweightCharts.LineStyle;
+
+/* ═══════════════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════════════ */
+let chart, candleSeries, volSeries;
+let currentTicker = 'NVDA';
+let currentResolution = '5m';
+let candleStyle = 'candle'; // 'candle' | 'hollow'
+
+const layerVisible = { resistance: true, support: true, fibonacci: true };
+const lineRefs     = { resistance: [], support: [], fibonacci: [] };
+
+// Per-fib tracking: key = patternId, value = { lines: [], hidden: bool }
+const fibPatterns = {};
+
+/* ═══════════════════════════════════════════════════════════
+   CHART SETUP
+═══════════════════════════════════════════════════════════ */
+function initChart() {
+  const container = document.getElementById('tvChart');
+  chart = LightweightCharts.createChart(container, {
+    layout: {
+      background: { type: 'solid', color: '#020617' },
+      textColor:  '#64748B',
+      fontSize:   11,
+      fontFamily: "'Fira Code', monospace",
+    },
+    grid: {
+      vertLines: { color: 'rgba(30,41,59,0.45)' },
+      horzLines: { color: 'rgba(30,41,59,0.45)' },
+    },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { color:'rgba(148,163,184,.25)', width:1, style:LINE_STYLE.Dashed, labelBackgroundColor:'#1E293B' },
+      horzLine: { color:'rgba(148,163,184,.25)', width:1, style:LINE_STYLE.Dashed, labelBackgroundColor:'#1E293B' },
+    },
+    rightPriceScale: {
+      borderColor: '#1E293B',
+      scaleMargins: { top:0.07, bottom:0.14 },
+    },
+    timeScale: {
+      borderColor: '#1E293B',
+      timeVisible: true,
+      secondsVisible: false,
+      fixLeftEdge: true,
+      fixRightEdge: true,
+    },
+    handleScroll: { mouseWheel:true, pressedMouseMove:true },
+    handleScale:  { mouseWheel:true, pinch:true, axisPressedMouseMove:true },
+  });
+
+  candleSeries = chart.addCandlestickSeries({
+    upColor:         '#22C55E',
+    downColor:       '#EF4444',
+    borderUpColor:   '#22C55E',
+    borderDownColor: '#EF4444',
+    wickUpColor:     '#22C55E',
+    wickDownColor:   '#EF4444',
+  });
+
+  volSeries = chart.addHistogramSeries({
+    priceFormat:  { type:'volume' },
+    priceScaleId: 'vol',
+  });
+  chart.priceScale('vol').applyOptions({ scaleMargins:{ top:0.86, bottom:0 } });
+
+  // Crosshair tooltip
+  chart.subscribeCrosshairMove(handleCrosshair);
+
+  // Responsive resize
+  const ro = new ResizeObserver(e => {
+    for (const en of e) {
+      chart.applyOptions({ width:en.contentRect.width, height:en.contentRect.height });
+    }
+  });
+  ro.observe(document.getElementById('chartWrap'));
+}
+
+function handleCrosshair(param) {
+  const box = document.getElementById('xhBox');
+  if (!param.time || !param.seriesData?.get(candleSeries)) {
+    box.style.display = 'none'; return;
+  }
+  const d = param.seriesData.get(candleSeries);
+  if (!d || d.open === undefined) { box.style.display='none'; return; }
+  box.style.display = 'block';
+
+  // Format time
+  let tLabel = '';
+  if (typeof param.time === 'number') {
+    tLabel = new Date(param.time * 1000).toLocaleString('en-US',
+      { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+  } else {
+    tLabel = param.time;
+  }
+  document.getElementById('xhDate').textContent = tLabel;
+
+  const fmt = v => '$' + v.toFixed(2);
+  document.getElementById('xhO').textContent = fmt(d.open);
+  document.getElementById('xhH').textContent = fmt(d.high);
+  document.getElementById('xhL').textContent = fmt(d.low);
+  const closeEl = document.getElementById('xhC');
+  closeEl.textContent = fmt(d.close);
+  closeEl.className   = 'xh-val ' + (d.close >= d.open ? 'up' : 'down');
+
+  // Volume from volSeries
+  const vd = param.seriesData.get(volSeries);
+  document.getElementById('xhV').textContent = vd
+    ? (vd.value / 1e6).toFixed(2) + 'M'
+    : '—';
+}
+
+/* ═══════════════════════════════════════════════════════════
+   LOADING STATE
+═══════════════════════════════════════════════════════════ */
+function setStatus(state, text) {
+  const badge = document.getElementById('statusBadge');
+  const stxt  = document.getElementById('statusText');
+  const dot   = badge.querySelector('.status-dot');
+  badge.className = 'loading ok err'.includes(state) ? state : '';
+  badge.className = state; // 'loading' | 'ok' | 'err' | ''
+  stxt.textContent = text;
+  dot.className = 'status-dot' + (state === 'loading' ? ' pulse' : '');
+}
+
+function showLoader(text='Loading...', sub='') {
+  const ol = document.getElementById('loadOverlay');
+  ol.classList.remove('hidden');
+  document.getElementById('loadText').textContent = text;
+  document.getElementById('loadSub').textContent  = sub;
+  document.getElementById('errBox').classList.remove('show');
+}
+
+function hideLoader() {
+  document.getElementById('loadOverlay').classList.add('hidden');
+}
+
+function showError(msg, sub='') {
+  hideLoader();
+  document.getElementById('errBox').classList.add('show');
+  document.getElementById('errMsg').textContent = msg;
+  document.getElementById('errSub').textContent = sub || 'Make sure the API server is running on port 8000: uvicorn api:app --reload';
+  setStatus('err', 'Error');
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CLEAR LINES
+═══════════════════════════════════════════════════════════ */
+function clearAllLines() {
+  ['resistance','support','fibonacci'].forEach(layer => {
+    lineRefs[layer].forEach(ref => {
+      try { candleSeries.removePriceLine(ref.line); } catch(e){}
+    });
+    lineRefs[layer] = [];
+  });
+  Object.keys(fibPatterns).forEach(k => delete fibPatterns[k]);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   LOAD CHART (main entry)
+═══════════════════════════════════════════════════════════ */
+async function loadChart() {
+  const ticker = document.getElementById('tickerInput').value.trim().toUpperCase();
+  if (!ticker) return;
+  currentTicker = ticker;
+
+  // Update watermark
+  document.getElementById('wmTicker').textContent = ticker;
+
+  // Disable button
+  const btn = document.getElementById('loadBtn');
+  btn.disabled = true;
+
+  // Clear previous lines
+  clearAllLines();
+  candleSeries.setData([]);
+  volSeries.setData([]);
+  renderSidePanel([], []);
+
+  // Reset header
+  document.getElementById('tickerSymbol').textContent = ticker;
+  document.getElementById('currentPrice').textContent = '—';
+  document.getElementById('priceChange').textContent  = '—';
+
+  showLoader(`Fetching ${ticker}...`, `Resolution: ${currentResolution}`);
+  setStatus('loading', 'Fetching OHLCV...');
+
+  try {
+    // Parallel fetch: OHLCV + key levels
+    const [ohlcvResp, levelsResp] = await Promise.allSettled([
+      fetch(`${API}/chart/ohlcv?ticker=${ticker}&interval=${currentResolution}`),
+      fetch(`${API}/chart/key-levels?ticker=${ticker}`),
+    ]);
+
+    // ── OHLCV ──
+    if (ohlcvResp.status === 'rejected') throw new Error('Network error: cannot reach API');
+    const ohlcvRes = ohlcvResp.value;
+    if (!ohlcvRes.ok) {
+      const err = await ohlcvRes.json().catch(() => ({}));
+      throw new Error(err.detail || `OHLCV error ${ohlcvRes.status}`);
+    }
+    const { candles } = await ohlcvRes.json();
+    if (!candles || candles.length === 0) throw new Error(`No candle data for ${ticker}`);
+
+    candleSeries.setData(candles);
+    volSeries.setData(candles.map(c => ({
+      time:  c.time,
+      value: c.volume,
+      color: c.close >= c.open
+        ? 'rgba(34,197,94,0.25)'
+        : 'rgba(239,68,68,0.25)',
+    })));
+
+    // Price header
+    const last  = candles[candles.length - 1];
+    const prev  = candles[candles.length - 2] || last;
+    const chg   = last.close - prev.close;
+    const chgPct= (chg / prev.close * 100).toFixed(2);
+    document.getElementById('currentPrice').textContent = `$${last.close.toFixed(2)}`;
+    const pcEl = document.getElementById('priceChange');
+    pcEl.textContent = `${chg >= 0 ? '+' : ''}$${chg.toFixed(2)} (${chg >= 0 ? '+' : ''}${chgPct}%)`;
+    pcEl.className   = chg >= 0 ? 'up' : 'down';
+
+    chart.timeScale().fitContent();
+
+    // ── KEY LEVELS ──
+    let levels = [], fibSetups = [];
+    if (levelsResp.status === 'fulfilled' && levelsResp.value.ok) {
+      const ldata = await levelsResp.value.json();
+      levels    = ldata.levels    || [];
+      fibSetups = ldata.fibSetups || [];
+    } else {
+      // Don't fail hard — just show empty levels
+      console.warn('Key levels not available');
+    }
+
+    drawLevels(levels, fibSetups);
+    renderSidePanel(levels, fibSetups);
+
+    // Re-apply visibility based on layer state
+    ['resistance','support','fibonacci'].forEach(layer => {
+      if (!layerVisible[layer]) applyLayerVisibility(layer, false);
+    });
+
+    hideLoader();
+    setStatus('ok', `${candles.length} candles loaded`);
+
+  } catch(err) {
+    showError(err.message || 'Unknown error', 'Check browser console for details.');
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DRAW LEVELS
+═══════════════════════════════════════════════════════════ */
+function impToWidth(imp) {
+  // importance 1→1  2→1.5  3→2  4→3  5→4
+  return [0,1,1.5,2,3,4][Math.min(imp,5)] || 1;
+}
+
+function drawLevels(levels, fibSetups) {
+  // Resistance
+  levels.filter(l => l.type === 'resistance').forEach(l => {
+    const alpha = 0.35 + l.importance * 0.12;
+    const line  = candleSeries.createPriceLine({
+      price:            l.price,
+      color:            `rgba(239,68,68,${alpha})`,
+      lineWidth:        impToWidth(l.importance),
+      lineStyle:        LINE_STYLE.Solid,
+      axisLabelVisible: true,
+      title:            `R $${l.price.toFixed(2)}  ×${l.touchCount}`,
+    });
+    lineRefs.resistance.push({ line, data: l });
+  });
+
+  // Support
+  levels.filter(l => l.type === 'support').forEach(l => {
+    const alpha = 0.35 + l.importance * 0.12;
+    const line  = candleSeries.createPriceLine({
+      price:            l.price,
+      color:            `rgba(34,197,94,${alpha})`,
+      lineWidth:        impToWidth(l.importance),
+      lineStyle:        LINE_STYLE.Solid,
+      axisLabelVisible: true,
+      title:            `S $${l.price.toFixed(2)}  ×${l.touchCount}`,
+    });
+    lineRefs.support.push({ line, data: l });
+  });
+
+  // Fibonacci — draw each setup's lines grouped
+  fibSetups.forEach((setup, idx) => {
+    const key   = setup.patternId || `fib-${idx}`;
+    const lines = [];
+
+    // Key colors per fib ratio
+    const ratioColor = {
+      '0.000':'rgba(245,158,11,0.30)',
+      '0.236':'rgba(245,158,11,0.40)',
+      '0.382':'rgba(245,158,11,0.55)',
+      '0.500':'rgba(245,158,11,0.65)',
+      '0.618':'rgba(34,197,94,0.70)',   // golden ratio — highlight green
+      '0.786':'rgba(245,158,11,0.50)',
+      '1.000':'rgba(245,158,11,0.30)',
+    };
+    const ratioWidth = {
+      '0.618': 2, '0.500': 1.5, '0.382': 1.5,
+    };
+
+    Object.entries(setup.levels).forEach(([ratio, price]) => {
+      const line = candleSeries.createPriceLine({
+        price,
+        color:            ratioColor[ratio] || 'rgba(245,158,11,0.4)',
+        lineWidth:        ratioWidth[ratio] || 1,
+        lineStyle:        ratio === '0.618' ? LINE_STYLE.Solid : LINE_STYLE.Dashed,
+        axisLabelVisible: ratio === '0.618',
+        title:            ratio === '0.618' ? `${setup.resolution} Entry` : '',
+      });
+      lines.push(line);
+      lineRefs.fibonacci.push({ line, data:{ price, ratio } });
+    });
+
+    fibPatterns[key] = { lines, hidden: false };
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOGGLE LAYERS
+═══════════════════════════════════════════════════════════ */
+function applyLayerVisibility(layer, visible) {
+  lineRefs[layer].forEach(({ line, data }) => {
+    if (visible) {
+      if (layer === 'resistance') {
+        const a = 0.35 + data.importance * 0.12;
+        line.applyOptions({ color:`rgba(239,68,68,${a})`, lineWidth:impToWidth(data.importance) });
+      } else if (layer === 'support') {
+        const a = 0.35 + data.importance * 0.12;
+        line.applyOptions({ color:`rgba(34,197,94,${a})`, lineWidth:impToWidth(data.importance) });
+      } else {
+        const ratioColor = {
+          '0.000':'rgba(245,158,11,0.30)', '0.236':'rgba(245,158,11,0.40)',
+          '0.382':'rgba(245,158,11,0.55)', '0.500':'rgba(245,158,11,0.65)',
+          '0.618':'rgba(34,197,94,0.70)',  '0.786':'rgba(245,158,11,0.50)',
+          '1.000':'rgba(245,158,11,0.30)',
+        };
+        line.applyOptions({
+          color: ratioColor[data.ratio] || 'rgba(245,158,11,0.4)',
+          lineWidth: data.ratio === '0.618' ? 2 : data.ratio === '0.500' || data.ratio === '0.382' ? 1.5 : 1,
+        });
+      }
+    } else {
+      line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0 });
+    }
+  });
+}
+
+function toggleLayer(layer) {
+  layerVisible[layer] = !layerVisible[layer];
+  const vis = layerVisible[layer];
+
+  const btnMap = { resistance:'togR', support:'togS', fibonacci:'togF' };
+  const clsMap = { resistance:'active-r', support:'active-g', fibonacci:'active-f' };
+  const btn = document.getElementById(btnMap[layer]);
+  btn.classList.toggle(clsMap[layer], vis);
+
+  applyLayerVisibility(layer, vis);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOGGLE INDIVIDUAL FIBONACCI PATTERN
+═══════════════════════════════════════════════════════════ */
+function toggleFibPattern(patternKey) {
+  const pat = fibPatterns[patternKey];
+  if (!pat) return;
+
+  pat.hidden = !pat.hidden;
+
+  pat.lines.forEach(line => {
+    if (pat.hidden) {
+      line.applyOptions({ color:'rgba(0,0,0,0)', lineWidth:0 });
+    } else {
+      // Only restore if the entire fibonacci layer is visible
+      if (layerVisible.fibonacci) {
+        // Can't know the ratio from line alone — just restore generic gold
+        line.applyOptions({ color:'rgba(245,158,11,0.45)', lineWidth:1 });
+      }
+    }
+  });
+
+  // Update card UI
+  const card = document.getElementById(`fibcard-${CSS.escape(patternKey)}`);
+  if (card) {
+    card.classList.toggle('fib-hidden', pat.hidden);
+    const icon = card.querySelector('.fib-toggle-icon');
+    if (icon) icon.textContent = pat.hidden ? '○' : '●';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   RESOLUTION SWITCH
+═══════════════════════════════════════════════════════════ */
+function setResolution(res) {
+  currentResolution = res;
+  document.querySelectorAll('.res-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.res === res);
+  });
+  if (currentTicker) loadChart();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CANDLE STYLE
+═══════════════════════════════════════════════════════════ */
+function toggleCandleStyle() {
+  candleStyle = candleStyle === 'candle' ? 'hollow' : 'candle';
+  const hollow = candleStyle === 'hollow';
+  candleSeries.applyOptions({
+    upColor:   hollow ? 'transparent' : '#22C55E',
+    downColor: hollow ? 'transparent' : '#EF4444',
+  });
+  document.getElementById('candleStyleLbl').textContent = hollow ? 'Hollow' : 'Candle';
+  document.getElementById('togCandle').classList.toggle('active-g', !hollow);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PANEL TABS
+═══════════════════════════════════════════════════════════ */
+let activeTab = 'R';
+function switchTab(t) {
+  activeTab = t;
+  ['R','S','F'].forEach(x => {
+    const tab   = document.getElementById(`tab${x}`);
+    const panel = document.getElementById(`panel${x}`);
+    const active = x === t;
+    tab.className   = 'ptab ' + (active ? (x==='R'?'active-r':x==='S'?'active-g':'active-f') : '');
+    panel.style.display = active ? 'block' : 'none';
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SIDE PANEL RENDERING
+═══════════════════════════════════════════════════════════ */
+function renderSidePanel(levels, fibSetups) {
+  const rLevels = levels.filter(l => l.type === 'resistance');
+  const sLevels = levels.filter(l => l.type === 'support');
+
+  document.getElementById('cntR').textContent = rLevels.length ? `(${rLevels.length})` : '';
+  document.getElementById('cntS').textContent = sLevels.length ? `(${sLevels.length})` : '';
+  document.getElementById('cntF').textContent = fibSetups.length ? `(${fibSetups.length})` : '';
+
+  const panR = document.getElementById('panelR');
+  const panS = document.getElementById('panelS');
+  const panF = document.getElementById('panelF');
+
+  panR.innerHTML = rLevels.length
+    ? rLevels.map(l => levelRowHTML(l,'r')).join('')
+    : emptyState('No resistance levels');
+  panS.innerHTML = sLevels.length
+    ? sLevels.map(l => levelRowHTML(l,'g')).join('')
+    : emptyState('No support levels');
+  panF.innerHTML = fibSetups.length
+    ? fibSetups.map((s,i) => fibCardHTML(s,i)).join('')
+    : emptyState('No Fibonacci setups');
+}
+
+function levelRowHTML(l, colorKey) {
+  const pips = [1,2,3,4,5].map(i =>
+    `<div class="pip ${i<=l.importance?'f-'+colorKey:''}"></div>`
+  ).join('');
+  return `
+    <div class="lvrow">
+      <div class="lv-bar ${colorKey}"></div>
+      <div class="lv-info">
+        <div class="lv-price">$${l.price.toFixed(2)}</div>
+        <div class="lv-meta">${l.touchCount} touch${l.touchCount>1?'es':''} · imp ${l.importance}</div>
+      </div>
+      <div class="imp-pips">${pips}</div>
+    </div>`;
+}
+
+function fibCardHTML(s, idx) {
+  const key = s.patternId || `fib-${idx}`;
+  const escKey = key.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const trendClass = s.trend === 'uptrend' ? 'up' : 'down';
+  const rr = typeof s.rr === 'number' ? s.rr.toFixed(2) : '—';
+
+  const levelsHTML = Object.entries(s.levels || {}).map(([ratio, price]) => `
+    <div class="fib-row">
+      <span class="fib-lbl">${ratio}</span>
+      <span class="fib-val">$${price.toFixed(2)}</span>
+    </div>`).join('');
+
+  return `
+    <div class="fib-card" id="fibcard-${escKey}"
+         onclick="toggleFibPattern('${key}')" title="Click to show/hide this pattern">
+      <div class="fib-head">
+        <div class="fib-head-left">
+          <span class="fib-trend ${trendClass}">${s.trend}</span>
+          <span class="fib-res">${s.resolution}</span>
+        </div>
+        <span class="fib-toggle-icon">●</span>
+      </div>
+      <div class="fib-body">
+        <div class="fib-range">${s.patternId} · ${s.rangePct}%</div>
+        <div class="fib-grid">${levelsHTML}</div>
+      </div>
+      <div class="fib-foot">
+        <span class="fib-entry">Entry: $${(s.entry||0).toFixed(2)}</span>
+        <span class="fib-rr">R:R ${rr}</span>
+      </div>
+    </div>`;
+}
+
+function emptyState(msg) {
+  return `<div class="empty-state">
+    <div class="empty-icon">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".4" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/></svg>
+    </div>
+    <div>${msg}</div>
+  </div>`;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════════════ */
+// Allow Enter key in ticker input
+document.getElementById('tickerInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') loadChart();
+});
+
+// Init chart engine
+initChart();
+
+// Auto-load NVDA on startup
+loadChart();
+</script>
+</body>
+</html>

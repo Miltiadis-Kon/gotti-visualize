@@ -237,13 +237,13 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
             )
 
             # Log the generated key levels out perfectly as the user requested
-            msg = f"\n{'='*60}\n📡 KEY LEVELS GENERATED FOR {current_date}\n{'='*60}\n"
+            msg = f"\n{'='*60}\nKEY LEVELS GENERATED FOR {current_date}\n{'='*60}\n"
             if not self.support_levels.empty:
-                msg += f"🟢 SUPPORT LEVELS:\n{self.support_levels.to_string()}\n"
+                msg += f"SUPPORT LEVELS:\n{self.support_levels.to_string()}\n"
             if not self.resistance_levels.empty:
-                msg += f"\n🔴 RESISTANCE LEVELS:\n{self.resistance_levels.to_string()}\n"
+                msg += f"\nRESISTANCE LEVELS:\n{self.resistance_levels.to_string()}\n"
             if not self.fib_trade_setups.empty:
-                msg += f"\n🌀 FIBONACCI SETUPS:\n{self.fib_trade_setups.to_string()}\n"
+                msg += f"\nFIBONACCI SETUPS:\n{self.fib_trade_setups.to_string()}\n"
             msg += f"{'='*60}\n"
             print(msg)
             self.log_message(msg)
@@ -718,7 +718,7 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
         if is_entry:
             msg = (
                 f"\n{'='*60}\n"
-                f"🚀 [ENTRY {mapped_trade_id} FILLED] {current_time} | {trade.trade_type}\n"
+                f"[ENTRY {mapped_trade_id} FILLED] {current_time} | {trade.trade_type}\n"
                 f"   Asset:        {self.parameters['Ticker'].symbol}\n"
                 f"   Quantity:     {quantity} @ ${price:.2f}\n"
                 f"   Take Profit:  ${trade.take_profit:.2f}\n"
@@ -833,9 +833,9 @@ def run_backtest(
 
 if __name__ == "__main__":
     run_backtest(
-        ticker="LYFT",
-        start_date=datetime(2026, 1, 1),
-        end_date=datetime(2026, 3, 20),
+        ticker="NVDA",
+        start_date=datetime(2026, 3, 1),
+        end_date=datetime(2026, 4, 13),
         budget=10000,
         min_importance=2,
         min_risk_reward=1.5,
