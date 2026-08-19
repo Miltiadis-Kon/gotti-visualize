@@ -466,15 +466,15 @@ A complete backtest run:
        ├── get_entry_signal($138.50, supports, resistances)
        │   ├── _check_long_entry()
        │   │   ├── Sort supports by importance desc, distance asc
-       │   │   ├── Support $138.20 (imp=4): within 0.5%? |138.50-138.20|/138.20 = 0.22% ✓
+       │   │   ├── Support $138.20 (imp=4): within 0.5%? |138.50-138.20|/138.20 = 0.22% [OK]
        │   │   ├── SL = 138.20 × 0.95 = $131.29
        │   │   ├── Risk = 138.50 - 131.29 = $7.21/share
        │   │   ├── Resistance $150.00 (above entry): TP = 150 × 0.98 = $147.00
        │   │   ├── Reward = 147.00 - 138.50 = $8.50
-       │   │   ├── R:R = 8.50/7.21 = 1.18 < 1.5 ✗
+       │   │   ├── R:R = 8.50/7.21 = 1.18 < 1.5 [FAIL]
        │   │   ├── Next resistance $160.00: TP = 160 × 0.98 = $156.80
        │   │   ├── Reward = 156.80 - 138.50 = $18.30
-       │   │   ├── R:R = 18.30/7.21 = 2.54 ≥ 1.5 ✓
+       │   │   ├── R:R = 18.30/7.21 = 2.54 ≥ 1.5 [OK]
        │   │   └── Return signal {BUY, entry=138.50, TP=156.80, SL=131.29, ...}
        │   └── (SHORT check skipped — LONG found)
        ├── _is_level_already_entered($138.20, "BUY") → False

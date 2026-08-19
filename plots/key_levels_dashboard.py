@@ -34,7 +34,7 @@ from strategies.key_levels import (
 # Page config
 st.set_page_config(
     page_title="Key Levels Dashboard",
-    page_icon="📈",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -58,7 +58,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Sidebar controls
-st.sidebar.title("📈 Key Levels Dashboard")
+st.sidebar.title(" Key Levels Dashboard")
 st.sidebar.markdown("---")
 
 # Ticker input
@@ -115,10 +115,10 @@ fib_threshold = st.sidebar.slider(
 ) / 100
 
 # Run analysis button
-analyze_button = st.sidebar.button("🔄 Refresh Analysis", type="primary")
+analyze_button = st.sidebar.button(" Refresh Analysis", type="primary")
 
 # Main content
-st.title(f"📊 {ticker} Key Levels Analysis")
+st.title(f" {ticker} Key Levels Analysis")
 
 # Cache the analysis to avoid re-running on every interaction
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -251,7 +251,7 @@ if analysis_success and selected_timeframe in timeframe_data:
             
             # Sidebar: Pattern Selection
             st.sidebar.markdown("---")
-            st.sidebar.subheader("📐 Fibonacci Patterns")
+            st.sidebar.subheader(" Fibonacci Patterns")
             
             # Multi-select for patterns (default to top 3)
             available_ranks = unique_patterns['pattern_rank'].tolist()
@@ -376,7 +376,7 @@ if analysis_success and selected_timeframe in timeframe_data:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("##### 🎯 Nearby Key Levels")
+        st.markdown("#####  Nearby Key Levels")
         if merged_df is not None and not merged_df.empty:
             # Show only levels in proximity
             display_df = merged_df[
@@ -402,7 +402,7 @@ if analysis_success and selected_timeframe in timeframe_data:
             )
     
     with col2:
-        st.markdown("##### 📐 Nearby Fibonacci Patterns (Ranked)")
+        st.markdown("#####  Nearby Fibonacci Patterns (Ranked)")
         if fib_df is not None and not fib_df.empty and 'pattern_rank' in fib_df.columns:
             display_fib = fib_df.copy()
             # Filter proximity

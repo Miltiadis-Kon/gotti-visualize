@@ -48,7 +48,7 @@ from plots.trade_report import (
 # Page config
 st.set_page_config(
     page_title="Trade Dashboard",
-    page_icon="📊",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -88,11 +88,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Sidebar controls
-st.sidebar.title("📊 Trade Dashboard")
+st.sidebar.title(" Trade Dashboard")
 st.sidebar.markdown("---")
 
 # Trade data source
-st.sidebar.subheader("📁 Trade Data")
+st.sidebar.subheader(" Trade Data")
 
 # Option to load trades
 data_source = st.sidebar.radio(
@@ -156,7 +156,7 @@ if data_source == "Load from File":
     # Ticker filter dropdown
     if ticker_options:
         selected_ticker = st.sidebar.selectbox(
-            "🎯 Filter by Ticker",
+            " Filter by Ticker",
             ticker_options,
             index=0
         )
@@ -189,7 +189,7 @@ if data_source == "Load from File":
                 ticker = tracker.ticker
                 
                 if trades:
-                    st.sidebar.success(f"✅ Loaded {len(trades)} trades for {ticker}")
+                    st.sidebar.success(f"[OK] Loaded {len(trades)} trades for {ticker}")
                 else:
                     st.sidebar.warning("No trades in file")
             except Exception as e:
@@ -231,14 +231,14 @@ else:
     with col2:
         end_date = st.date_input("End Date", datetime.now())
     
-    if st.sidebar.button("🚀 Run Backtest", type="primary"):
+    if st.sidebar.button(" Run Backtest", type="primary"):
         st.sidebar.info("Backtest feature coming soon. Run from command line for now.")
         st.sidebar.code("python strategies/key_levels_strategy.py")
 
 st.sidebar.markdown("---")
 
 # Timeframe selection
-st.sidebar.subheader("📈 Chart Settings")
+st.sidebar.subheader(" Chart Settings")
 timeframe_options = {
     '1D (Daily)': '1d',
     '4H (4 Hour)': '4h', 
@@ -250,7 +250,7 @@ selected_tf_label = st.sidebar.selectbox("Chart Timeframe", list(timeframe_optio
 selected_timeframe = timeframe_options[selected_tf_label]
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("👁️ Display Options")
+st.sidebar.subheader("️ Display Options")
 
 # Toggle options
 show_trades = st.sidebar.checkbox("Show Trade Markers", value=True)
@@ -271,7 +271,7 @@ else:
     min_importance = 1
 
 # Main content
-st.title(f"📊 {ticker} Trade Analysis")
+st.title(f" {ticker} Trade Analysis")
 
 # Statistics row
 if trades:
@@ -386,7 +386,7 @@ if chart_df is not None and not chart_df.empty:
         default_range = (min_date, max_date)
     
     date_range = st.slider(
-        "📅 Date Range",
+        " Date Range",
         min_value=min_date,
         max_value=max_date,
         value=default_range,
@@ -615,7 +615,7 @@ if chart_df is not None and not chart_df.empty:
         # Trade report table
         if trades:
             st.markdown("---")
-            st.subheader("📋 Trade Report")
+            st.subheader(" Trade Report")
             
             # Generate report DataFrame
             report_df = generate_trade_report(trades)
@@ -664,7 +664,7 @@ if chart_df is not None and not chart_df.empty:
             with col1:
                 csv = report_df.to_csv(index=False)
                 st.download_button(
-                    "📥 Download CSV",
+                    " Download CSV",
                     csv,
                     file_name=f"{ticker}_trades_{datetime.now().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
@@ -678,7 +678,7 @@ if chart_df is not None and not chart_df.empty:
                         'trades': [t.to_dict() for t in tracker.trades]
                     }, indent=2, default=str)
                     st.download_button(
-                        "📥 Download JSON",
+                        " Download JSON",
                         json_data,
                         file_name=f"{ticker}_trades_{datetime.now().strftime('%Y%m%d')}.json",
                         mime="application/json"

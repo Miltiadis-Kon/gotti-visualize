@@ -739,7 +739,7 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
             )
             
             pnl_str = f"+${closed_trade.pnl:.2f}" if closed_trade.pnl >= 0 else f"-${abs(closed_trade.pnl):.2f}"
-            icon = "✅" if closed_trade.pnl > 0 else "❌"
+            icon = "[OK]" if closed_trade.pnl > 0 else "[FAIL]"
             
             msg = (
                 f"\n{'='*60}\n"

@@ -6,8 +6,9 @@ lumibot
 lightweight-charts
 streamlit
 numpy< 2.0.0
+yfinance
 
 # API
 fastapi
-uvicorn
+uvicorn[standard]
 pymysql

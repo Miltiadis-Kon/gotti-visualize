@@ -140,7 +140,7 @@ def plot_key_levels_lightweight(ticker: str,
     fib_count = len(fib_df.drop_duplicates(subset=['fib_price'])) if fib_df is not None and not fib_df.empty else 0
     level_count = len(merged_df) if merged_df is not None else 0
     
-    print(f"\n✅ Lightweight chart opened for {ticker}")
+    print(f"\n[OK] Lightweight chart opened for {ticker}")
     print(f"   Timeframe: {timeframe_label}")
     print(f"   Key Levels: {level_count} | Fibonacci: {fib_count}")
     

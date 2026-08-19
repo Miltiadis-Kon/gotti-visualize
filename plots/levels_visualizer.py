@@ -24,7 +24,7 @@ from strategies.key_levels import KeyLevels, TIMEFRAME_LOOKBACK
 # Page config
 st.set_page_config(
     page_title="Levels Visualizer",
-    page_icon="📊",
+    page_icon="",
     layout="wide"
 )
 
@@ -36,10 +36,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Daily Levels Visualizer")
+st.title(" Daily Levels Visualizer")
 
 # Sidebar - Load levels file
-st.sidebar.header("📁 Load Levels Data")
+st.sidebar.header(" Load Levels Data")
 
 logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 
@@ -74,13 +74,13 @@ try:
     strategy = data['strategy']
     levels_list = data['levels']
     
-    st.sidebar.success(f"✅ Loaded {len(levels_list)} days for {ticker}")
+    st.sidebar.success(f"[OK] Loaded {len(levels_list)} days for {ticker}")
 except Exception as e:
     st.error(f"Error loading file: {e}")
     st.stop()
 
 # Date selection
-st.sidebar.header("📅 Select Date")
+st.sidebar.header(" Select Date")
 
 dates = [entry['date'] for entry in levels_list]
 start_date = dates[0]  # First date in backtest
@@ -253,7 +253,7 @@ st.plotly_chart(fig, use_container_width=True)
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("🟢 Support Levels")
+    st.subheader(" Support Levels")
     if selected_levels['supports']:
         supports_df = pd.DataFrame(selected_levels['supports'])
         supports_df = supports_df.sort_values('price', ascending=False)
@@ -262,7 +262,7 @@ with col1:
         st.info("No supports found")
 
 with col2:
-    st.subheader("🔴 Resistance Levels")
+    st.subheader(" Resistance Levels")
     if selected_levels['resistances']:
         resistances_df = pd.DataFrame(selected_levels['resistances'])
         resistances_df = resistances_df.sort_values('price', ascending=True)

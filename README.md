@@ -1,16 +1,51 @@
-# Welcome to  Gotti - Visualizer
+# Welcome to Gotti - Visualizer
 
-This repository is to be used alongside gotti-backend and gotti-frontend repositiories. 
-
-This is the core repository that includes all trading strategies, backtesting, signal generation and data processing. 
+This repository is to be used alongside **stock-alchemist**. It provides the FastAPI backend and chart visualizations, and shares a MySQL database with stock-alchemist for inter-service communication.
 
 ![Visualization Example](AAPL_2024-09-21_15-57-59.png)
 
-### To use run the following commands
+##  Docker Setup (Recommended — runs 24/7)
 
-```bash
-pip install --requirements.txt
-streamlit run ./main.py
+Both `gotti-visualize` and `stock-alchemist` run together from this directory.
+
+### Prerequisites
+- [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/)
+
+### Steps
+
+```powershell
+# 1. Clone both repos side-by-side into the same parent folder
+git clone <gotti-visualize-url>
+git clone <stock-alchemist-url>
+
+# 2. Enter gotti-visualize
+cd gotti-visualize
+
+# 3. Set up your environment variables
+copy .env.example .env
+# Edit .env and fill in DB_PASSWORD, API keys, etc.
+
+# 4. Start the entire ecosystem
+docker compose up -d --build
+```
+
+### Services
+
+| Service | URL | Description |
+|---|---|---|
+| `gotti-api` | http://localhost:8000 | FastAPI — charts, key levels, DB browser |
+| `gotti-api` docs | http://localhost:8000/docs | Swagger UI |
+| `stock-alchemist` | http://localhost:8080 | Analysis engine + health |
+| `mysql` | localhost:3306 | Shared database (internal only) |
+
+### Useful commands
+
+```powershell
+docker compose ps                    # check all services are healthy
+docker compose logs -f gotti-api     # stream gotti-api logs
+docker compose logs -f stock-alchemist
+docker compose down                  # stop everything (data persisted in volume)
+docker compose down -v               # stop + wipe database volume
 ```
 
 ### Overview

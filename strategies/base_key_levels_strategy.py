@@ -242,8 +242,8 @@ class BaseKeyLevelsStrategy(Strategy):
         """Called natively by Lumibot at the end of the simulation."""
         # Only liquidate automatically if we are in a backtest and reaching the simulated end
         if getattr(self, "backtesting_end", None) is not None:
-            self.log_message(f"\n{'='*60}\n🏁 SIMULATION COMPLETE. LIQUIDATING FOR FINAL PROFIT.\n{'='*60}")
-            print(f"\n{'='*60}\n🏁 SIMULATION COMPLETE. LIQUIDATING FOR FINAL PROFIT.\n{'='*60}")
+            self.log_message(f"\n{'='*60}\n SIMULATION COMPLETE. LIQUIDATING FOR FINAL PROFIT.\n{'='*60}")
+            print(f"\n{'='*60}\n SIMULATION COMPLETE. LIQUIDATING FOR FINAL PROFIT.\n{'='*60}")
             self.on_abrupt_closing()
 
     def on_abrupt_closing(self):

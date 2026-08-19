@@ -152,7 +152,7 @@ DataSource (ABC)
 
 **Split Handling (FIXED - Nov 28, 2025)**
 
-✅ **ThetaData split handling is now working correctly.**
+[OK] **ThetaData split handling is now working correctly.**
 
 The ThetaData Data Downloader returns **UNADJUSTED** prices (NOT split-adjusted like Yahoo).
 The `_apply_corporate_actions_to_frame()` function applies split adjustments with idempotency protection.
@@ -171,8 +171,8 @@ The `_apply_corporate_actions_to_frame()` function applies split adjustments wit
 |-----------|------|-----------|--------|
 | No adjustment | 7.5% | -64% | WRONG - unadjusted |
 | Multiple adjustments (broken) | 81% | -95% | WRONG - over-adjusted |
-| With idempotency fix | 55.07% | -18.69% | ✅ CORRECT |
-| Yahoo baseline | 56% | -27% | ✅ CORRECT |
+| With idempotency fix | 55.07% | -18.69% | [OK] CORRECT |
+| Yahoo baseline | 56% | -27% | [OK] CORRECT |
 
 **Dividend Handling (FIXED - Nov 28, 2025)**
 
@@ -377,8 +377,8 @@ LUMIBOT_CACHE_MODE=readwrite
 
 ### Split Adjustment Rules
 
-- **Yahoo**: Already split-adjusted, no action needed ✅
-- **ThetaData Data Downloader**: Returns UNADJUSTED data - adjustment code applies splits ✅
+- **Yahoo**: Already split-adjusted, no action needed [OK]
+- **ThetaData Data Downloader**: Returns UNADJUSTED data - adjustment code applies splits [OK]
   - Fixed Nov 28, 2025: Added idempotency check to prevent multiple adjustments
   - Results now match Yahoo within ~1-2%
 - **Polygon**: Handles splits in `validate_cache()`
