@@ -33,17 +33,15 @@ from strategies.key_levels import (
     TIMEFRAME_IMPORTANCE,
     PRICE_THRESHOLD
 )
-from plots.chart_utils import (
-    create_trade_chart,
-    add_trade_markers,
-    add_key_levels,
-    COLORS
-)
+from plots.chart_builder import ChartBuilder
+from plots.renderers import get_renderer
+from plots.renderers.plotly_renderer import COLORS
 from plots.trade_report import (
     generate_trade_report,
     calculate_statistics,
     format_trade_for_display
 )
+
 
 # Page config
 st.set_page_config(
@@ -402,215 +400,37 @@ if chart_df is not None and not chart_df.empty:
         st.warning("No data in selected date range.")
     else:
         current_price = filtered_chart_df['close'].iloc[-1]
-        
-        # Create the chart
-        fig = go.Figure()
-        
-        # Add candlestick
-        fig.add_trace(go.Candlestick(
-            x=filtered_chart_df['date_plot'],
-            open=filtered_chart_df['open'],
-            high=filtered_chart_df['high'],
-            low=filtered_chart_df['low'],
-            close=filtered_chart_df['close'],
-            name=ticker,
-            increasing_line_color=COLORS['candle_up'],
-            decreasing_line_color=COLORS['candle_down'],
-            increasing_fillcolor=COLORS['candle_up'],
-            decreasing_fillcolor=COLORS['candle_down']
-        ))
-        
-        x_start = filtered_chart_df['date_plot'].iloc[0]
-        x_end = filtered_chart_df['date_plot'].iloc[-1]
-        
-        # Add key levels
+
+        # ── Build chart with ChartBuilder + PlotlyRenderer ──────────────
+        builder = ChartBuilder(ticker, filtered_chart_df, timeframe=selected_tf_label)
+        builder.add_candlesticks()
+
         if show_key_levels and levels_df is not None and not levels_df.empty:
-            # Proximity filter
-            proximity_pct = 0.25
-            min_price = current_price * (1 - proximity_pct)
-            max_price = current_price * (1 + proximity_pct)
-            
-            filtered_levels = levels_df[
-                (levels_df['importance'] >= min_importance) &
-                (levels_df['level_price'] >= min_price) &
-                (levels_df['level_price'] <= max_price)
-            ]
-            
-            for _, row in filtered_levels.iterrows():
-                level_type = row['type']
-                
-                if (level_type == 'support' and not show_support) or \
-                   (level_type == 'resistance' and not show_resistance):
-                    continue
-                
-                color = COLORS['support'] if level_type == 'support' else COLORS['resistance']
-                dash_style = 'solid' if row['importance'] >= 4 else 'dash'
-                width = 2 if row['importance'] >= 4 else 1
-                
-                fig.add_trace(go.Scatter(
-                    x=[x_start, x_end],
-                    y=[row['level_price'], row['level_price']],
-                    mode='lines+text',
-                    line=dict(color=color, width=width, dash=dash_style),
-                    text=["", f"${row['level_price']:.2f}"],
-                    textposition="middle right",
-                    textfont=dict(color=color, size=10),
-                    showlegend=False,
-                    hovertemplate=f"<b>${row['level_price']:.2f}</b><br>{row['type'].title()}<br>Importance: {row['importance']}<extra></extra>"
-                ))
-        
-        # Add trades
+            builder.add_key_levels(
+                levels_df,
+                min_importance=min_importance,
+                show_support=show_support,
+                show_resistance=show_resistance,
+            )
+
         if show_trades and trades:
-            # Filter trades in date range
             visible_trades = [
-                t for t in trades 
+                t for t in trades
                 if t.date_executed and date_range[0] <= t.date_executed <= date_range[1]
             ]
-            
-            for trade in visible_trades:
-                entry_date = trade.date_executed
-                exit_date = trade.date_completed if trade.date_completed else x_end
-                
-                # Trade zone shading
-                if trade.date_completed:
-                    zone_color = COLORS['trade_win'] if trade.is_winner else COLORS['trade_loss']
-                    fig.add_vrect(
-                        x0=entry_date,
-                        x1=exit_date,
-                        fillcolor=zone_color,
-                        layer="below",
-                        line_width=0,
-                    )
-                
-                # TP/SL lines
-                if show_tp_sl:
-                    # Take Profit line
-                    fig.add_trace(go.Scatter(
-                        x=[entry_date, exit_date],
-                        y=[trade.take_profit, trade.take_profit],
-                        mode='lines',
-                        line=dict(color=COLORS['tp_line'], width=1, dash='dash'),
-                        showlegend=False,
-                        hovertemplate=f"<b>Take Profit</b><br>${trade.take_profit:.2f}<extra></extra>"
-                    ))
-                    
-                    # Stop Loss line
-                    fig.add_trace(go.Scatter(
-                        x=[entry_date, exit_date],
-                        y=[trade.stop_loss, trade.stop_loss],
-                        mode='lines',
-                        line=dict(color=COLORS['sl_line'], width=1, dash='dash'),
-                        showlegend=False,
-                        hovertemplate=f"<b>Stop Loss</b><br>${trade.stop_loss:.2f}<extra></extra>"
-                    ))
-                
-                # Entry marker
-                fig.add_trace(go.Scatter(
-                    x=[entry_date],
-                    y=[trade.entry_price],
-                    mode='markers+text',
-                    marker=dict(
-                        symbol='triangle-up',
-                        size=14,
-                        color=COLORS['entry_marker'],
-                        line=dict(width=1, color='white')
-                    ),
-                    text=[f"BUY ${trade.entry_price:.2f}"],
-                    textposition="top center",
-                    textfont=dict(color=COLORS['entry_marker'], size=10),
-                    showlegend=False,
-                    hovertemplate=(
-                        f"<b>ENTRY</b><br>"
-                        f"Price: ${trade.entry_price:.2f}<br>"
-                        f"Qty: {trade.quantity}<br>"
-                        f"TP: ${trade.take_profit:.2f}<br>"
-                        f"SL: ${trade.stop_loss:.2f}"
-                        f"<extra></extra>"
-                    )
-                ))
-                
-                # Exit marker
-                if trade.date_completed and trade.exit_price:
-                    exit_color = COLORS['entry_marker'] if trade.is_winner else COLORS['exit_marker']
-                    pnl_text = f"+${trade.pnl:.2f}" if trade.pnl >= 0 else f"-${abs(trade.pnl):.2f}"
-                    
-                    fig.add_trace(go.Scatter(
-                        x=[trade.date_completed],
-                        y=[trade.exit_price],
-                        mode='markers+text',
-                        marker=dict(
-                            symbol='triangle-down',
-                            size=14,
-                            color=exit_color,
-                            line=dict(width=1, color='white')
-                        ),
-                        text=[f"{trade.exit_reason} {pnl_text}"],
-                        textposition="bottom center",
-                        textfont=dict(color=exit_color, size=10),
-                        showlegend=False,
-                        hovertemplate=(
-                            f"<b>EXIT ({trade.exit_reason})</b><br>"
-                            f"Price: ${trade.exit_price:.2f}<br>"
-                            f"PnL: {pnl_text}"
-                            f"<extra></extra>"
-                        )
-                    ))
-        
-        # Layout
-        tick_format = '%Y-%m-%d\n%H:%M' if selected_timeframe in ['15m', '5m', '1h'] else '%Y-%m-%d'
-        
-        fig.update_layout(
-            title=dict(
-                text=f"{ticker} • {selected_tf_label} • ${current_price:.2f}",
-                font=dict(size=20, color=COLORS['text'], family='Arial'),
-                x=0.01,
-                xanchor='left'
-            ),
-            xaxis_title="",
-            yaxis_title="",
-            template="plotly_dark",
-            plot_bgcolor=COLORS['background'],
-            paper_bgcolor=COLORS['paper'],
-            font=dict(family='Arial', size=11, color=COLORS['text_secondary']),
-            xaxis=dict(
-                gridcolor=COLORS['grid'],
-                showgrid=True,
-                zeroline=False,
-                rangeslider=dict(visible=False),
-                showspikes=True,
-                spikemode='across',
-                spikesnap='cursor',
-                tickformat=tick_format,
-            ),
-            yaxis=dict(
-                side='right',
-                gridcolor=COLORS['grid'],
-                showgrid=True,
-                zeroline=False,
-                tickprefix='$',
-                tickformat='.2f',
-                showspikes=True,
-                spikemode='across',
-                spikesnap='cursor',
-                range=[
-                    filtered_chart_df['low'].min() * 0.98,
-                    filtered_chart_df['high'].max() * 1.02
-                ]
-            ),
-            legend=dict(visible=False),
-            height=650,
-            margin=dict(l=10, r=60, t=50, b=20),
-            hovermode='x unified',
-            hoverlabel=dict(
-                bgcolor='#1e222d',
-                font_size=12,
-                font_family='Arial',
-                bordercolor='#2a2e39'
+            builder.add_trades(
+                visible_trades,
+                show_tp_sl=show_tp_sl,
+                show_zones=True,
             )
-        )
-        
+
+        builder.set_height(650)
+        spec = builder.build()
+        fig = get_renderer("plotly").render(spec)
+
         # Display chart
         st.plotly_chart(fig, use_container_width=True)
+
         
         # Trade report table
         if trades:

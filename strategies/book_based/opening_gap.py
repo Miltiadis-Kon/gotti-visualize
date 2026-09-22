@@ -27,7 +27,7 @@ It’s not the actual news, but how the markets respond to that news that is imp
 From the book : Carter, John F - Mastering the trade proven techniques for profiting from intraday and swing trading setups-McGraw-Hill Education (2019)
 '''
 
-import webbrowser
+import sys
 import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
@@ -40,7 +40,10 @@ from lumibot.traders import Trader
 import os
 from dotenv import load_dotenv
 
-import plotly.graph_objects as go
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+from strategies.plot_mixin import PlottableStrategyMixin
 
 
 load_dotenv()
@@ -57,7 +60,7 @@ ALPACA_CONFIG = {
 
 
 
-class OpeningGap(Strategy):
+class OpeningGap(Strategy, PlottableStrategyMixin):
     
     parameters = {
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
@@ -138,7 +141,50 @@ class OpeningGap(Strategy):
             # Plot the trade
             pass
             
-                     
+    def get_plot_spec(self):
+        """Describe this strategy's visualization using the new plotting pipeline."""
+        import yfinance as yf
+        import pandas as pd
+        import warnings
+        from datetime import datetime, timedelta
+        from plots.plot_spec import PlotSpec, CandlestickLayer, TradeMarkersLayer, IndicatorLayer
+
+        ticker = self.parameters.get('Ticker')
+        if hasattr(ticker, 'symbol'):
+            ticker = ticker.symbol
+
+        layers = []
+
+        try:
+            end = datetime.now()
+            start = end - timedelta(days=400)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                df = yf.download(ticker, start=start.strftime('%Y-%m-%d'),
+                                 end=end.strftime('%Y-%m-%d'), interval='1d',
+                                 progress=False, auto_adjust=True)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
+                                    'Close': 'close', 'Volume': 'volume'}, inplace=True)
+                df.reset_index(inplace=True)
+                layers.append(CandlestickLayer(data=df, ticker=ticker, timeframe='1D'))
+        except Exception:
+            pass
+
+        return PlotSpec(ticker=ticker, timeframe='1D', layers=layers)
+
+    def on_strategy_end(self):
+        if getattr(self, "will_plot", False) and getattr(self, "is_backtesting", False):
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            output_path = os.path.join(
+                repo_root,
+                'logs', 'charts',
+                f"{self.parameters.get('Ticker', 'chart')}_chart.html"
+            )
+            self.save_plot_html(output_path)
+        return super().on_strategy_end()
     
     ##### TRADING FUNCTIONS #####
     def filter(self):

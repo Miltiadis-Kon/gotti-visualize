@@ -1,0 +1,10 @@
+| Strategy | CAGR | Total Return | Max Drawdown | Win Rate | Trades | Sharpe |
+|----------|------|--------------|--------------|----------|--------|--------|
+| HCR Breakout Long | 0.00% | 0.00% | {'drawdown': np.float64(0.0), 'date': Timestamp('2025-09-12 09:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| HCR Breakout Short | 0.00% | 0.00% | {'drawdown': np.float64(0.0), 'date': Timestamp('2025-09-12 09:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| Fib Retrace Swing | 0.00% | 0.00% | {'drawdown': np.float64(0.0), 'date': Timestamp('2025-09-12 09:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| Gap Setup Long | 2.83% | 2.82% | {'drawdown': np.float64(0.09264168588493699), 'date': Timestamp('2026-07-08 08:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| Gap Setup Short | -3.82% | -3.81% | {'drawdown': np.float64(0.09518509691293163), 'date': Timestamp('2026-09-09 08:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| Retrace Long | 3.64% | 3.63% | {'drawdown': np.float64(0.03586423234103563), 'date': Timestamp('2026-07-08 08:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| Retrace Short | -9.01% | -8.98% | {'drawdown': np.float64(0.13581374217533637), 'date': Timestamp('2026-09-09 08:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |
+| RSI Setup | -3.80% | -3.79% | {'drawdown': np.float64(0.08377193040122947), 'date': Timestamp('2026-09-09 08:30:00-0400', tz='America/New_York')} | N/A | N/A | N/A |

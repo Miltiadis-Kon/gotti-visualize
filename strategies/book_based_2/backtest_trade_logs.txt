@@ -1,0 +1,6 @@
+Backtest start = 2025-09-12 00:00:00-04:00
+Backtest end = 2026-09-12 00:00:00-04:00
+YahooData.__init__ received: datetime_start=2025-09-12 00:00:00-04:00, datetime_end=2026-09-12 00:00:00-04:00
+YahooData.__init__ calling super().__init__ with: datetime_start=2025-09-12 00:00:00-04:00, datetime_end=2026-09-12 00:00:00-04:00
+[RetraceLong] Starting backtest...
+Backtesting starting...

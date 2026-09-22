@@ -5,6 +5,9 @@ import os
 import sys
 from datetime import datetime, timedelta
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     import pymysql
@@ -34,16 +37,23 @@ def chart_redirect():
     return RedirectResponse(url="/plots/stock_chart.html")
 
 @app.get("/")
-def read_root():
-    return {"status": "ok", "service": "gotti-api"}
+def root_redirect():
+    """Redirect root to the Strategy Hub Dashboard."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/plots/strategies.html")
+
+@app.get("/strategies")
+def strategies_page():
+    """Serve the Strategy Hub UI."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/plots/strategies.html")
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
 
-# Example endpoint to list strategies
-@app.get("/strategies")
-def list_strategies():
+@app.get("/api/strategies")
+def list_strategies_json():
     strategies_dir = "strategies"
     strategies = []
     if os.path.exists(strategies_dir):

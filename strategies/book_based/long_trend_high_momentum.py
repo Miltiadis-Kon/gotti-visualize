@@ -10,7 +10,7 @@ In this system I want the trend of the STOCK to be up in a very simple way.
 From the book : Automated STOCK Trading Systems by Lawrence Bensdorp
 """
 
-import webbrowser
+import sys
 import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
@@ -23,7 +23,11 @@ from lumibot.traders import Trader
 import os
 from dotenv import load_dotenv
 
-import plotly.graph_objects as go
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from strategies.plot_mixin import PlottableStrategyMixin
 
 
 
@@ -48,7 +52,7 @@ def rank():
     """
     pass
 
-class LongTrendHighMomentum(Strategy):
+class LongTrendHighMomentum(Strategy, PlottableStrategyMixin):
     
     parameters = {
         "AvgDailyVolume": 50000000,
@@ -62,11 +66,9 @@ class LongTrendHighMomentum(Strategy):
         
     def initialize(self):
         self.sleeptime = "1D" # Execute strategy every day once
-        self.will_plot = self.parameters["Plot"]
-        self.positions = 0 
-        if self.is_backtesting and self.will_plot: # Initialize the plot
-            self.initialize_plot()
-            self.plots = []
+        self.will_plot = self.parameters.get('Plot', True)
+        self._plot_trades = []  # Collects trade records for get_plot_spec()
+        self.positions_count = 0 
         
     def before_market_opens(self):
         # Get the data once before market opens to not waste time
@@ -114,91 +116,51 @@ class LongTrendHighMomentum(Strategy):
         return True
     
     ##### PLOT FUNCTIONS #####
-    
-    def schedule_plot(self,order,price,date):
-        """Schedule the plot to be executed after the order is filled"""
-        self.plots.append({"order": order, "price": price, "date": date})
-        current_date = self.get_datetime()
-        current_date_timestamp = pd.Timestamp(current_date - timedelta(days=60))
-        for plot in self.plots:
-        #    print (current_date_timestamp - plot["date"])
-            if (current_date_timestamp - plot["date"]).days > 0:
-                self.plots.remove(plot)      
-                # Return a scatter list  
-                expiration = plot["date"] + timedelta(days=90)
-                
-                buy = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["price"],plot["price"]],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="blue"),
-                                    name="Entry Price")
-                
-                stop_loss = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["order"].stop_loss_price,plot["price"]],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="red"),
-                                    name="Stop Loss")
-                
-                take_profit = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["order"].take_profit_price,plot["order"].take_profit_price],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="green"),
-                                    name="Take Profit")
-                
-                scatter = [buy,stop_loss,take_profit]
-                self.scatters.append(scatter)                
-                break        
-       
-    def initialize_plot(self):
-        """Initialize the plot"""
-        self.date = self.get_datetime()
-        self.fig = go.Figure()
-        
-        self.scatters = []
-        
-        self.fig.update_layout(title=f"{self.parameters['Ticker']} - Long Trend High Momentum Strategy",
-                            xaxis_title="Date",
-                            yaxis_title="Price",
-                            template="plotly_dark")
-    
-    
-    def plot(self):
-        """Plot the strategy"""
-        diff = abs(self.get_datetime() - self.date).days
-        data = self.get_historical_prices(self.parameters["Ticker"],diff,"day").df
-        self.fig = go.Figure(data=[go.Candlestick(x=data.index,
-                                                   open=data['open'],
-                                                   high=data['high'],
-                                                   low=data['low'],
-                                                   close=data['close'])])
-        for scatter in self.scatters:
-            self.fig.add_traces(scatter) 
-                # Create buttons to toggle scatter traces
-                
-        buttons = []
-        for i, scatter in enumerate(self.scatters):
-            buttons.append(dict(
-                label=f'Scatter {i+1}',
-                method='update',
-                args=[{'visible': [True] * (len(self.fig.data) - len(self.scatters)) + [False] * len(self.scatters)},
-                      {'title': f'Scatter {i+1}'}]
-            ))
-            buttons[-1]['args'][0]['visible'][len(self.fig.data) - len(self.scatters) + i] = True
 
-        # Add buttons to layout
-        self.fig.update_layout(
-            updatemenus=[dict(
-                type="buttons",
-                direction="down",
-                buttons=buttons,
-                showactive=True,
-            )]
-        )      
-    
-    
+    def get_plot_spec(self):
+        """Describe this strategy's visualization using the new plotting pipeline."""
+        import yfinance as yf
+        import pandas as pd
+        import warnings
+        from datetime import datetime, timedelta
+        from plots.plot_spec import PlotSpec, CandlestickLayer, TradeMarkersLayer, IndicatorLayer
+
+        ticker = self.parameters.get('Ticker')
+        if hasattr(ticker, 'symbol'):
+            ticker = ticker.symbol
+
+        layers = []
+
+        # Fetch daily OHLCV covering the backtest period
+        try:
+            end = datetime.now()
+            start = end - timedelta(days=400)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                df = yf.download(ticker, start=start.strftime('%Y-%m-%d'),
+                                 end=end.strftime('%Y-%m-%d'), interval='1d',
+                                 progress=False, auto_adjust=True)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
+                                    'Close': 'close', 'Volume': 'volume'}, inplace=True)
+                df.reset_index(inplace=True)
+                layers.append(CandlestickLayer(data=df, ticker=ticker, timeframe='1D'))
+        except Exception:
+            pass
+
+        # Add trade markers from scheduled plots
+        if hasattr(self, '_plot_trades') and self._plot_trades:
+            from plots.plot_spec import TradeMarkersLayer
+            layers.append(TradeMarkersLayer(trades=self._plot_trades, show_tp_sl=True, show_zones=True))
+
+        return PlotSpec(ticker=ticker, timeframe='1D', layers=layers)
+
         ##### PLOT FUNCTIONS #####
 
     ############################
+
     
     
     def on_trading_iteration(self):
@@ -243,14 +205,19 @@ class LongTrendHighMomentum(Strategy):
                 
         self.submit_order(order)
         
-        if self.is_backtesting and self.will_plot: 
-            self.schedule_plot(order,bars["close"].iloc[-1],bars.index[-1])  
+        if self.is_backtesting and self.will_plot:
+            pass  # Trade visualization is handled via get_plot_spec() / render_plot()  
     
     def on_strategy_end(self):
-        if self.will_plot:
-            self.plot()
-            self.fig.write_html(f".\logs\charts\Chart.html")
-            webbrowser.open(f".\logs\charts\Chart.html")
+        if self.will_plot and self.is_backtesting:
+            ticker = self.parameters.get('Ticker', 'chart')
+            ticker_symbol = ticker.symbol if hasattr(ticker, 'symbol') else str(ticker)
+            output_path = os.path.join(
+                repo_root,
+                'logs', 'charts',
+                f"{ticker_symbol}_chart.html"
+            )
+            self.save_plot_html(output_path)
                 
         return super().on_strategy_end()  
 

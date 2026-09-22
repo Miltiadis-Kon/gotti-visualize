@@ -36,9 +36,10 @@ from key_levels import (
     DEFAULT_PRICE_THRESHOLD
 )
 from trade_tracker import TradeTracker
+from plot_mixin import PlottableStrategyMixin
 
 
-class BaseKeyLevelsStrategy(Strategy):
+class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
     """
     Base class for key levels trading strategies.
     
@@ -270,11 +271,23 @@ class BaseKeyLevelsStrategy(Strategy):
         
         # Save trades
         self.after_market_closes()
-        
+
         # Print summary
         if self.trade_tracker.trades:
             self.trade_tracker.print_summary()
-    
+
+        # Save chart if requested (opt-in via parameter)
+        if self.parameters.get("PLOT", False) or self.parameters.get("Plot", False) or self.parameters.get("SAVE_PLOT", False):
+            chart_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "charts")
+            os.makedirs(chart_dir, exist_ok=True)
+            chart_path = os.path.join(chart_dir, f"{self._output_filename}_chart.html")
+            try:
+                self.save_plot_html(chart_path)
+                print(f"Chart saved to: {chart_path}")
+            except Exception as e:
+                self.log_message(f"Error saving chart: {e}")
+
+
     ##### ABSTRACT METHODS - CHILD MUST IMPLEMENT #####
     
     @abstractmethod
@@ -604,5 +617,120 @@ class BaseKeyLevelsStrategy(Strategy):
             json.dump(data, f, indent=2)
         
         self.log_message(f"Levels history saved: {len(self._levels_history)} days to {os.path.basename(filepath)}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # PlottableStrategyMixin implementation
+    # ──────────────────────────────────────────────────────────────────
+
+    @property
+    def ticker_symbol(self) -> str:
+        """Convenience accessor for the ticker string."""
+        t = self.parameters.get("Ticker", "UNKNOWN")
+        return t.symbol if hasattr(t, "symbol") else str(t)
+
+    def get_plot_spec(self):
+        """Return a PlotSpec describing what this strategy wants to visualize.
+
+        Builds a spec from the strategy's current state:
+        - CandlestickLayer — daily OHLCV data fetched via yfinance
+        - KeyLevelsLayer   — merged S/R levels loaded during the backtest
+        - TradeMarkersLayer — all trades recorded by TradeTracker
+
+        This method is called by :meth:`render_plot` (from
+        :class:`~strategies.plot_mixin.PlottableStrategyMixin`).
+        """
+        # Local imports so this file stays importable without optional deps
+        from plots.plot_spec import (
+            PlotSpec,
+            CandlestickLayer,
+            KeyLevelsLayer,
+            TradeMarkersLayer,
+        )
+        import yfinance as yf
+
+        ticker = self.ticker_symbol
+        layers = []
+
+        # ── 1. Candlestick layer — fetch daily OHLCV ──────────────────
+        try:
+            from datetime import timedelta as _td, datetime as _dt
+            if getattr(self, "backtesting_start", None) and getattr(self, "backtesting_end", None):
+                start = pd.to_datetime(self.backtesting_start) - _td(days=5)
+                end   = pd.to_datetime(self.backtesting_end) + _td(days=5)
+            elif self.trade_tracker and self.trade_tracker.trades:
+                all_dates = [
+                    pd.to_datetime(t.date_executed) for t in self.trade_tracker.trades
+                    if t.date_executed
+                ]
+                all_comp = [
+                    pd.to_datetime(t.date_completed) for t in self.trade_tracker.trades
+                    if t.date_completed
+                ]
+                if all_dates:
+                    start = min(all_dates) - _td(days=5)
+                    end   = (max(all_comp) if all_comp else max(all_dates)) + _td(days=5)
+                else:
+                    end   = _dt.now()
+                    start = end - _td(days=90)
+            else:
+                end   = _dt.now()
+                start = end - _td(days=90)
+
+            if start >= end:
+                end = start + _td(days=30)
+
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                df = yf.download(
+                    ticker,
+                    start=start.strftime("%Y-%m-%d"),
+                    end=end.strftime("%Y-%m-%d"),
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True,
+                )
+
+            if not df.empty:
+                import pandas as _pd
+                if isinstance(df.columns, _pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                df.rename(
+                    columns={"Open": "open", "High": "high",
+                             "Low": "low", "Close": "close", "Volume": "volume"},
+                    inplace=True,
+                )
+                df.reset_index(inplace=True)
+                layers.append(
+                    CandlestickLayer(data=df, ticker=ticker, timeframe="1D")
+                )
+        except Exception as exc:
+            self.log_message(f"[get_plot_spec] Could not fetch price data: {exc}")
+
+        # ── 2. Key levels layer ───────────────────────────────────────
+        if self.merged_levels is not None and not self.merged_levels.empty:
+            layers.append(
+                KeyLevelsLayer(
+                    levels_df=self.merged_levels,
+                    min_importance=self.min_importance,
+                )
+            )
+
+        # ── 3. Trade markers layer ────────────────────────────────────
+        if self.trade_tracker and self.trade_tracker.trades:
+            layers.append(
+                TradeMarkersLayer(
+                    trades=self.trade_tracker.trades,
+                    show_tp_sl=True,
+                    show_zones=True,
+                )
+            )
+
+        return PlotSpec(
+            ticker=ticker,
+            timeframe="1D",
+            layers=layers,
+        )
+
 
 

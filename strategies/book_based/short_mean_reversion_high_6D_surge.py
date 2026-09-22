@@ -10,7 +10,7 @@ means there is a large chance of it correcting
 and reverting back to its mean.
 
 '''
-import webbrowser
+import sys
 import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
@@ -23,7 +23,10 @@ from lumibot.traders import Trader
 import os
 from dotenv import load_dotenv
 
-import plotly.graph_objects as go
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+from strategies.plot_mixin import PlottableStrategyMixin
 
 
 load_dotenv()
@@ -38,7 +41,7 @@ ALPACA_CONFIG = {
 }
 
 
-class ShortMeanReversionHigh6DSurge(Strategy):
+class ShortMeanReversionHigh6DSurge(Strategy, PlottableStrategyMixin):
     
     parameters = {
         "AvgDailyShares": 1000000,
@@ -52,13 +55,9 @@ class ShortMeanReversionHigh6DSurge(Strategy):
         
     def initialize(self):
         self.sleeptime = "1D" # Execute strategy every day once
-        self.will_plot = self.parameters["Plot"]
+        self.will_plot = self.parameters.get('Plot', True)
+        self._plot_trades = []  # Collects trade records for get_plot_spec()
         self.risk_percent = 0.02 # 2% risk per trade
-
-        if self.is_backtesting and self.will_plot: # Initialize the plot
-            self.initialize_plot()
-            self.position_ctr = 0
-            self.plots = []
     
     def before_market_opens(self):
         
@@ -121,15 +120,19 @@ class ShortMeanReversionHigh6DSurge(Strategy):
     #    self.submit_order(order2)
 
         if self.is_backtesting and self.will_plot: 
-            self.schedule_plot(price,self.get_datetime(),stop_loss,take_profit) 
+            pass  # Trade visualization is handled via get_plot_spec() / render_plot()
             
     
      
     def on_strategy_end(self):
-        if self.will_plot:
-            self.plot()
-            self.fig.write_html(r".\logs\charts\Chart.html")
-            webbrowser.open(r".\logs\charts\Chart.html")
+        if self.will_plot and self.is_backtesting:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            output_path = os.path.join(
+                repo_root,
+                'logs', 'charts',
+                f"{self.parameters.get('Ticker', 'chart')}_chart.html"
+            )
+            self.save_plot_html(output_path)
                     
     ########################
     
@@ -242,109 +245,45 @@ class ShortMeanReversionHigh6DSurge(Strategy):
     
     ############################
     
-    ##### PLOT FUNCTIONS #####
-    
-    def schedule_plot(self,price,date,stop_loss,take_profit):
-        """Schedule the plot to be executed after the order is filled"""
-        self.plots.append({"price": price, "date": date,"stop_loss":stop_loss,"take_profit":take_profit})
-        current_date = self.get_datetime()
-#       current_date_timestamp = pd.Timestamp(current_date - timedelta(days=60))
-        current_date_timestamp = pd.Timestamp(current_date)
-        for plot in self.plots:
-        #    print (current_date_timestamp - plot["date"])
-            if (current_date_timestamp - plot["date"]).days > 0:
-                self.position_ctr += 1
-                self.plots.remove(plot)      
-                # Return a scatter list  
-                expiration = plot["date"] + timedelta(days=90)
-                
-                
-                buy = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["price"],plot["price"]],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="blue"),
-                                    name= f"Order {self.position_ctr}"
-                                    )
-                
-                stop_loss = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["stop_loss"],plot["stop_loss"]],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="red"),
-                                    name= f"Order {self.position_ctr}"
-                                    )
-                
-                take_profit = go.Scatter(x=[plot["date"],expiration],
-                                 y=[plot["take_profit"],plot["take_profit"]],
-                                    mode="lines",
-                                    marker=dict(size=[10],color="green"),
-                                    name= f"Order {self.position_ctr}"
-                                    )
-                
-            #    scatter = [buy,stop_loss,take_profit]
-                self.scatters.append(buy)
-                self.scatters.append(stop_loss)
-                self.scatters.append(take_profit)               
-                break        
-       
-    def initialize_plot(self):
-        """Initialize the plot"""
-        self.date = self.get_datetime()
-        self.fig = go.Figure()
-        
-        self.scatters = []
-        
-        self.fig.update_layout(title=f"{self.parameters['Ticker']} - Long Trend High Momentum Strategy",
-                            xaxis_title="Date",
-                            yaxis_title="Price",
-                            template="plotly_dark")
-    
-    
-    def plot(self):
-        """Plot the strategy"""
-        diff = abs(self.get_datetime() - self.date).days
-        data = self.get_historical_prices(self.parameters["Ticker"],diff,"day").df
-        self.fig = go.Figure(data=[go.Candlestick(x=data.index,
-                                                   open=data['open'],
-                                                   high=data['high'],
-                                                   low=data['low'],
-                                                   close=data['close'])])
-        for scatter in self.scatters:
-            self.fig.add_traces(scatter)
-                # Create buttons to toggle scatter traces
-        
-        buttons = []
-        button_visibility = {}
-        for i, scatter in enumerate(self.scatters):
-            scatter_name = scatter.name
-            if scatter_name not in button_visibility:
-                button_visibility[scatter_name] = [True] * (len(self.fig.data) - len(self.scatters)) + [False] * len(self.scatters)
-                button_visibility[scatter_name][len(self.fig.data) - len(self.scatters) + i] = True
-                button = dict(
-                    label=scatter_name,
-                    method="update",
-                    args=[{"visible": button_visibility[scatter_name]}]
-                )
-                buttons.append(button)
-            else:
-                button_visibility[scatter_name][len(self.fig.data) - len(self.scatters) + i] = True
-        
-        self.fig.update_layout(
-        updatemenus=[
-            dict(
-                active=0,
-                buttons=buttons,
-                direction="down",
-                showactive=True,
-                x=0.17,
-                xanchor="left",
-                y=1.15,
-                yanchor="top"
-            )
-        ]
-    )
-    
-    
-        ##### PLOT FUNCTIONS #####
+    def get_plot_spec(self):
+        """Describe this strategy's visualization using the new plotting pipeline."""
+        import yfinance as yf
+        import pandas as pd
+        import warnings
+        from datetime import datetime, timedelta
+        from plots.plot_spec import PlotSpec, CandlestickLayer, TradeMarkersLayer, IndicatorLayer
+
+        ticker = self.parameters.get('Ticker')
+        if hasattr(ticker, 'symbol'):
+            ticker = ticker.symbol
+
+        layers = []
+
+        # Fetch daily OHLCV covering the backtest period
+        try:
+            end = datetime.now()
+            start = end - timedelta(days=400)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                df = yf.download(ticker, start=start.strftime('%Y-%m-%d'),
+                                 end=end.strftime('%Y-%m-%d'), interval='1d',
+                                 progress=False, auto_adjust=True)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
+                                    'Close': 'close', 'Volume': 'volume'}, inplace=True)
+                df.reset_index(inplace=True)
+                layers.append(CandlestickLayer(data=df, ticker=ticker, timeframe='1D'))
+        except Exception:
+            pass
+
+        # Add trade markers from scheduled plots
+        if hasattr(self, '_plot_trades') and self._plot_trades:
+            from plots.plot_spec import TradeMarkersLayer
+            layers.append(TradeMarkersLayer(trades=self._plot_trades, show_tp_sl=True, show_zones=True))
+
+        return PlotSpec(ticker=ticker, timeframe='1D', layers=layers)
 
     ############################
 

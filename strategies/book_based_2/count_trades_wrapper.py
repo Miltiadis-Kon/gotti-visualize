@@ -1,0 +1,69 @@
+﻿import sys
+from datetime import datetime
+sys.path.append(r"E:\repos\gotti-visualize")
+
+import lumibot.tools.helpers
+lumibot.tools.helpers.print_progress_bar = lambda *args, **kwargs: None
+
+from lumibot.backtesting import YahooDataBacktesting
+from lumibot.entities import Asset
+
+from strategies.book_based_2.hcr_breakout_long import HCRBreakoutLong
+from strategies.book_based_2.hcr_breakout_short import HCRBreakoutShort
+from strategies.book_based_2.fib_retrace_swing import FibRetraceSwing
+from strategies.book_based_2.gap_setup_long import OpeningGapLong
+from strategies.book_based_2.gap_setup_short import OpeningGapShort
+from strategies.book_based_2.retrace_long import RetraceLong
+from strategies.book_based_2.retrace_short import RetraceShort
+from strategies.book_based_2.rsi_setup import RSISetup
+
+start = datetime(2025, 9, 12)
+end = datetime(2026, 9, 12)
+
+strategies = [
+    ("HCR Breakout Long", HCRBreakoutLong),
+    ("HCR Breakout Short", HCRBreakoutShort),
+    ("Fib Retrace Swing", FibRetraceSwing),
+    ("Gap Setup Long", OpeningGapLong),
+    ("Gap Setup Short", OpeningGapShort),
+    ("Retrace Long", RetraceLong),
+    ("Retrace Short", RetraceShort),
+    ("RSI Setup", RSISetup)
+]
+
+for ticker in ["NVDA", "PLTR", "MARA"]:
+    print(f"\n--- {ticker} Trades ---")
+    params = {"Ticker": Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK), "Plot": False}
+    
+    for name, cls in strategies:
+        # Wrap on_filled_order to count fills
+        original_on_filled_order = cls.on_filled_order
+        cls._fill_count = 0
+        
+        def new_on_filled_order(self, position, order, price, quantity, multiplier):
+            self.__class__._fill_count += 1
+            original_on_filled_order(self, position, order, price, quantity, multiplier)
+            
+        cls.on_filled_order = new_on_filled_order
+        
+        try:
+            cls.backtest(
+                YahooDataBacktesting,
+                start, end,
+                budget=10_000,
+                parameters=params,
+                show_plot=False
+            )
+            # A completed setup usually has 1 entry and 1 exit = 2 fills
+            # (Bracket orders trigger an additional fill)
+            # Let's just print the raw fill count to give a rough estimate of activity.
+            # Usually, fills / 2 = trades
+            trades = cls._fill_count // 2
+            print(f"{name:20s}: {trades} trades (approx)")
+        except Exception as e:
+            print(f"{name:20s}: ERROR")
+            
+        # Restore
+        cls.on_filled_order = original_on_filled_order
+
+print("Done.")

@@ -1,47 +1,35 @@
 """
-Chart Utilities Module
+Chart Utilities Module — Backward Compatibility Shims
 
-Reusable TradingView-style chart functions extracted from key_levels_dashboard.py.
-Provides functions for creating candlestick charts with trade overlays.
+.. deprecated::
+    All functions in this module are deprecated.  Use the new pipeline:
+
+        from plots.chart_builder import ChartBuilder
+        from plots.renderers import get_renderer
+
+    The ``COLORS`` constant has moved to ``plots.renderers.plotly_renderer.COLORS``.
+    It is re-exported here for backward compatibility.
+
+These wrappers will continue to work but will emit DeprecationWarnings.
 """
 
+import warnings
 import plotly.graph_objects as go
 import pandas as pd
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-# Try to import Trade from trade_tracker
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# COLORS re-exported from canonical location for backward compatibility
+from plots.renderers.plotly_renderer import COLORS
+
+# Trade import (optional — only needed if create_trade_chart is called with trades)
 try:
     from strategies.trade_tracker import Trade
 except ImportError:
-    Trade = None  # Will work without trades
-
-
-# TradingView-style color scheme
-COLORS = {
-    'background': '#131722',
-    'paper': '#131722',
-    'text': '#d1d4dc',
-    'text_secondary': '#b2b5be',
-    'grid': 'rgba(42, 46, 57, 0.6)',
-    'candle_up': '#26a69a',
-    'candle_down': '#ef5350',
-    'support': 'rgba(38, 166, 154, 0.9)',
-    'resistance': 'rgba(239, 83, 80, 0.9)',
-    'tp_line': 'rgba(38, 166, 154, 0.8)',
-    'sl_line': 'rgba(239, 83, 80, 0.8)',
-    'trade_win': 'rgba(38, 166, 154, 0.15)',
-    'trade_loss': 'rgba(239, 83, 80, 0.15)',
-    'entry_marker': '#26a69a',
-    'exit_marker': '#ef5350',
-    'fib_382': 'rgba(255, 215, 0, 0.7)',
-    'fib_50': 'rgba(255, 165, 0, 0.7)',
-    'fib_618': 'rgba(255, 99, 71, 0.7)',
-}
+    Trade = None
 
 
 def create_candlestick_chart(
@@ -51,24 +39,22 @@ def create_candlestick_chart(
 ) -> go.Figure:
     """
     Create a basic TradingView-style candlestick chart.
-    
-    Parameters:
-    -----------
-    ticker : str
-        Stock symbol
-    chart_df : pd.DataFrame
-        OHLCV data with columns: open, high, low, close, and date_plot or Date
-    timeframe : str
-        Timeframe label for display
-        
-    Returns:
-    --------
-    go.Figure
-        Plotly figure with candlestick chart
+
+    .. deprecated::
+        Use ``ChartBuilder(ticker, df).add_candlesticks().build()`` +
+        ``get_renderer('plotly').render(spec)`` instead.
     """
+    warnings.warn(
+        "create_candlestick_chart is deprecated. "
+        "Use ChartBuilder + get_renderer('plotly') instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     fig = go.Figure()
-    
+
     # Prepare date column
+
     if 'date_plot' not in chart_df.columns:
         if 'Date' in chart_df.columns:
             chart_df = chart_df.copy()

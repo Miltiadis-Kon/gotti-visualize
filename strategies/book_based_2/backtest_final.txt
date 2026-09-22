@@ -1,0 +1,10 @@
+| Strategy | CAGR | Total Return | Max Drawdown | Win Rate | Trades | Sharpe |
+|----------|------|--------------|--------------|----------|--------|--------|
+| HCR Breakout Long | Error | unsupported format s | - | - | - | - |
+| HCR Breakout Short | Error | unsupported format s | - | - | - | - |
+| Fib Retrace Swing | Error | unsupported format s | - | - | - | - |
+| Gap Setup Long | Error | unsupported format s | - | - | - | - |
+| Gap Setup Short | Error | unsupported format s | - | - | - | - |
+| Retrace Long | Error | unsupported format s | - | - | - | - |
+| Retrace Short | Error | unsupported format s | - | - | - | - |
+| RSI Setup | Error | unsupported format s | - | - | - | - |

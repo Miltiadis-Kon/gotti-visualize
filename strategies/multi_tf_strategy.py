@@ -24,6 +24,9 @@ import yfinance as yf
 from lumibot.backtesting import YahooDataBacktesting
 from lumibot.entities import Asset
 from dotenv import load_dotenv
+import lumibot.tools.helpers
+lumibot.tools.helpers.print_progress_bar = lambda *args, **kwargs: None
+
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -822,22 +825,26 @@ def run_backtest(
             "MIN_IMPORTANCE": min_importance,
             "MIN_RISK_REWARD": min_risk_reward,
             "SAVE_FILES": save_files,
+            "PLOT": True,
         },
         save_logfile=save_files,
         save_tearsheet=save_files,
-        show_plot=save_files,
-        show_tearsheet=save_files,
+        show_plot=False,
+        show_tearsheet=False,
         save_stats_file=save_files
     )
 
 
 if __name__ == "__main__":
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=14)
     run_backtest(
         ticker="NVDA",
-        start_date=datetime(2026, 3, 1),
-        end_date=datetime(2026, 4, 13),
+        start_date=start_dt,
+        end_date=end_dt,
         budget=10000,
         min_importance=2,
         min_risk_reward=1.5,
-        save_files=False
+        save_files=True
     )
+

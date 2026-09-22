@@ -1,5 +1,5 @@
 # ---- Base image ----
-FROM python:3.11-slim AS base
+FROM python:3.12-slim AS base
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,7 +18,7 @@ WORKDIR /app
 
 # Install Python dependencies first (layer caching)
 COPY requirements.txt .
-RUN pip install --default-timeout=100 --no-cache-dir -r requirements.txt
+RUN pip install uv && uv pip install --system --no-cache -r requirements.txt
 
 # Copy application source
 COPY . .
