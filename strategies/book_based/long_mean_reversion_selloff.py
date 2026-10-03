@@ -7,7 +7,6 @@ import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
 from lumibot.backtesting import YahooDataBacktesting
-from lumibot.strategies import Strategy
 from lumibot.brokers import Alpaca
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
@@ -33,19 +32,25 @@ ALPACA_CONFIG = {
 }
 
 
-class LongMeanReversionSelloff(Strategy, PlottableStrategyMixin):
+from strategies.strat_baseplate import StrategyBaseplate
+
+
+class LongMeanReversionSelloff(StrategyBaseplate):
     
     parameters = {
+        **StrategyBaseplate.parameters,
         "AvgDailyShares": 1000000,
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
         "TrailStopLoss" : False, # True if you want to use a trail stop with no tp,
                               #False if you want to use a 2:1 tp:sl ratio
-        "Plot": True # True if you want to plot the trades, False if you don't want to plot the trades
+        "Plot": True, # True if you want to plot the trades, False if you don't want to plot the trades
+        "TradingStyle": "swing_trading",
     }
     
     ##### CORE FUNCTIONS #####
         
     def initialize(self):
+        super().initialize()
         self.sleeptime = "1D" # Execute strategy every day once
         self.will_plot = self.parameters.get('Plot', True)
         self._plot_trades = []  # Collects trade records for get_plot_spec()
@@ -92,21 +97,39 @@ class LongMeanReversionSelloff(Strategy, PlottableStrategyMixin):
         
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
-        if  order.side == "sell":
+        if order.side in ("sell", "sell_short"):
+            self.current_trailing_stop = None
             return
         
-        take_profit = self.get_take_profit(price)
-        stop_loss = self.get_stop_loss(price)
+        # 1. Custom strategy calculation (custom 4% TP, custom 2.5x ATR SL)
+        custom_tp = self.get_take_profit(price)
+        custom_sl = self.get_stop_loss(price)
+        
+        # 2. Pass through ATR optimization function on top of custom ones
+        risk_levels = self.optimize_sl_tp(
+            entry_price=price,
+            stop_loss=custom_sl,
+            take_profit=custom_tp,
+            side="buy",
+            trading_style=self.parameters.get("TradingStyle", "swing_trading"),
+            trailing_stop=self.parameters.get("TrailStopLoss", False),
+        )
+        take_profit = risk_levels.take_profit
+        stop_loss = risk_levels.stop_loss
             
         # Update order's take profit and stop loss prices
-        order2 = self.create_order(asset = self.parameters["Ticker"],
-                                    quantity=order.quantity,
-                                    take_profit_price=take_profit,
-                                    stop_loss_price= stop_loss,
-                                    side="sell",
-                                    time_in_force="gtc"
-                                    )
-        
+        order_kwargs = {
+            "asset": self.parameters["Ticker"],
+            "quantity": order.quantity,
+            "side": "sell",
+            "time_in_force": "gtc",
+        }
+        if take_profit is not None:
+            order_kwargs["take_profit_price"] = take_profit
+        if stop_loss is not None:
+            order_kwargs["stop_loss_price"] = stop_loss
+            
+        order2 = self.create_order(**order_kwargs)
         
         order.add_child_order(order2)
     #    self.submit_order(order2)
@@ -117,14 +140,17 @@ class LongMeanReversionSelloff(Strategy, PlottableStrategyMixin):
     
      
     def on_strategy_end(self):
-        if self.will_plot and self.is_backtesting:
+        if getattr(self, "will_plot", False) and getattr(self, "is_backtesting", False):
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            ticker = self.parameters.get('Ticker', 'chart')
+            ticker_symbol = ticker.symbol if hasattr(ticker, 'symbol') else str(ticker)
             output_path = os.path.join(
                 repo_root,
                 'logs', 'charts',
-                f"{self.parameters.get('Ticker', 'chart')}_chart.html"
+                f"{ticker_symbol}_chart.html"
             )
             self.save_plot_html(output_path)
+        return super().on_strategy_end()
                     
     ########################
     
@@ -140,12 +166,12 @@ class LongMeanReversionSelloff(Strategy, PlottableStrategyMixin):
         if self.ticker_bars["close"].iloc[-1] < 1:
             return False
           
-        shares = self.ticker_bars["volume"].iloc[-50].mean() / self.ticker_bars["close"].iloc[-50].mean()
-        if shares < self.parameters["AvgDailyShares"]:
+        shares = self.ticker_bars["volume"].iloc[-50:].mean()
+        if shares < self.parameters.get("AvgDailyShares", 1000000):
             return False
         
         atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        if atr is None or atr.iloc[-1] < 0.05:
+        if atr is None or (atr.iloc[-1] / self.ticker_bars["close"].iloc[-1]) < 0.05:
             return False
         
         return True
@@ -178,7 +204,8 @@ class LongMeanReversionSelloff(Strategy, PlottableStrategyMixin):
         2.5 times the ATR of the last ten days below the execution price.
         """
         atr = ta.atr(self.ticker_bars["high"], self.ticker_bars["low"], self.ticker_bars["close"], length=10)
-        return entry - atr.iloc[-1] * 2.5
+        atr_val = atr.iloc[-1] if (atr is not None and not pd.isna(atr.iloc[-1])) else (entry * 0.05)
+        return entry - atr_val * 2.5
     
     def get_take_profit(self,entry):
         """
@@ -190,7 +217,7 @@ class LongMeanReversionSelloff(Strategy, PlottableStrategyMixin):
         """
         2 percent risk and 10 percent maximum percent size
         """
-        return round((self.cash / self.ticker_bars["close"].iloc[-1]) * self.risk_percent)
+        return round((self.get_portfolio_value() / self.ticker_bars["close"].iloc[-1]) * self.risk_percent)
 
     
     

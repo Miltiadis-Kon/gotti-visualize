@@ -15,7 +15,6 @@ import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
 from lumibot.backtesting import YahooDataBacktesting
-from lumibot.strategies import Strategy
 from lumibot.brokers import Alpaca
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
@@ -52,28 +51,34 @@ def rank():
     """
     pass
 
-class LongTrendHighMomentum(Strategy, PlottableStrategyMixin):
+from strategies.strat_baseplate import StrategyBaseplate
+
+
+class LongTrendHighMomentum(StrategyBaseplate):
     
     parameters = {
+        **StrategyBaseplate.parameters,
         "AvgDailyVolume": 50000000,
         "SmaLength":50,
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
         "TrailStopLoss" : False, # True if you want to use a trail stop with no tp,
                               #False if you want to use a 2:1 tp:sl ratio
         "RiskRewardRatio" : 2, # Risk Reward Ratio for the trade
-        "Plot": True # True if you want to plot the trades, False if you don't want to plot the trades
+        "Plot": True, # True if you want to plot the trades, False if you don't want to plot the trades
+        "TradingStyle": "trend_following",
+        "ATR_SL_Multiplier": 5.0,
     }
         
     def initialize(self):
+        super().initialize()
         self.sleeptime = "1D" # Execute strategy every day once
         self.will_plot = self.parameters.get('Plot', True)
         self._plot_trades = []  # Collects trade records for get_plot_spec()
-        self.positions_count = 0 
         
     def before_market_opens(self):
-        # Get the data once before market opens to not waste time
-        self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"],self.parameters["SmaLength"],"day").df
-        self.spy_bars = self.get_historical_prices("SPY",100,"day").df
+        # Get the data once before market opens to not waste time (fetch at least 100 bars for SMA50)
+        self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"], 100, "day").df
+        self.spy_bars = self.get_historical_prices("SPY", 100, "day").df
 
         return super().before_market_opens()
 
@@ -174,15 +179,32 @@ class LongTrendHighMomentum(Strategy, PlottableStrategyMixin):
            # print("Position size is 0. No order will be placed.")
             return
         
+        entry_price = float(self.ticker_bars["close"].iloc[-1])
         bars = self.ticker_bars.iloc[-20:]
-        atr = (ta.atr(bars["high"],bars["low"],bars["close"]).iloc[-1] * 5)
-        sl = bars["close"].iloc[-1] - atr
-        tp = bars["close"].iloc[-1] + atr * self.parameters["RiskRewardRatio"]
+        raw_atr = self.get_atr(df=bars)
+        
+        # 1. Custom calculation
+        custom_sl = entry_price - (raw_atr * 5.0)
+        custom_tp = entry_price + (raw_atr * 5.0 * self.parameters.get("RiskRewardRatio", 2))
 
-              
-#       print(f"{self.parameters["Ticker"]} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
+        # 2. Pass through ATR optimization function
+        risk_levels = self.optimize_sl_tp(
+            entry_price=entry_price,
+            stop_loss=custom_sl,
+            take_profit=custom_tp,
+            side="buy",
+            atr=raw_atr,
+            trading_style=self.parameters.get("TradingStyle", "trend_following"),
+            sl_multiplier=self.parameters.get("ATR_SL_Multiplier", 5.0),
+            risk_reward_ratio=self.parameters.get("RiskRewardRatio", 2),
+            trailing_stop=self.parameters.get("TrailStopLoss", False),
+        )
+        sl = risk_levels.stop_loss
+        tp = risk_levels.take_profit
+
+#       print(f"{self.parameters['Ticker']} meets all the requirements to be traded using the Long Trend High Momentum strategy.")
         # Place an oco order
-        if self.parameters["TrailStopLoss"] :
+        if self.parameters.get("TrailStopLoss", False):
             order = self.create_order(
                 asset=self.parameters["Ticker"],
                 quantity=order_size,
@@ -207,6 +229,11 @@ class LongTrendHighMomentum(Strategy, PlottableStrategyMixin):
         
         if self.is_backtesting and self.will_plot:
             pass  # Trade visualization is handled via get_plot_spec() / render_plot()  
+    
+    def on_filled_order(self, position, order, price, quantity, multiplier):
+        """Bracket order already has embedded SL/TP child orders."""
+        if order.side in ("sell", "sell_short"):
+            self.current_trailing_stop = None
     
     def on_strategy_end(self):
         if self.will_plot and self.is_backtesting:

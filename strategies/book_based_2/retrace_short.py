@@ -9,23 +9,32 @@ EXACT RULES (5-Minute Timeframe):
     4. Stop loss 1 penny above the swing high.
 """
 
-from lumibot.strategies import Strategy
 from lumibot.entities import Asset
+import pandas_ta as ta
+from strategies.strat_baseplate import StrategyBaseplate
 
-class RetraceShort(Strategy):
+
+class RetraceShort(StrategyBaseplate):
     parameters = {
+        **StrategyBaseplate.parameters,
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
         "Plot": False,
+        "TradingStyle": "day_trading",
     }
 
     def initialize(self):
+        super().initialize()
         self.sleeptime = "5M"
         self.risk_percent = 0.02
         self.trigger_low = None
         self.swing_high = None
+        self.stop_price = None
+        self.target_price = None
         
     def on_trading_iteration(self):
-        symbol = self.parameters["Ticker"].symbol
+        symbol = self.parameters["Ticker"]
+        if hasattr(symbol, "symbol"):
+            symbol = symbol.symbol
         bars = self.get_historical_prices(symbol, 200, "minute")
         if bars is None or len(bars.df) < 50: return
         df = bars.df
@@ -45,12 +54,37 @@ class RetraceShort(Strategy):
                 self.swing_high = c3['high'] + 0.01
                 
             if self.trigger_low is not None and current_price <= self.trigger_low:
-                qty = (10000.0 * self.risk_percent) / max(0.01, (self.swing_high - current_price))
+                custom_sl = self.swing_high
+                custom_tp = current_price * 0.99  # 1% day trade target below entry
+                
+                # Compute 5-min ATR locally
+                df.ta.atr(length=14, append=True)
+                atr_col = [c for c in df.columns if c.startswith('ATRr')]
+                atr = df[atr_col[0]].iloc[-2] if atr_col else None
+                
+                risk_levels = self.optimize_sl_tp(
+                    entry_price=current_price,
+                    stop_loss=custom_sl,
+                    take_profit=custom_tp,
+                    side="sell",
+                    atr=atr,
+                    trading_style=self.parameters.get("TradingStyle", "day_trading"),
+                )
+                self.stop_price = risk_levels.stop_loss
+                self.target_price = risk_levels.take_profit
+                
+                risk_budget = self.get_portfolio_value() * self.risk_percent
+                qty = risk_budget / max(0.01, (self.stop_price - current_price))
                 if qty >= 1:
-                    order = self.create_order(symbol, int(qty), "sell")
+                    order = self.create_order(symbol, int(qty), "sell_short")
                     self.submit_order(order)
                     self.trigger_low = None
+                    self.swing_high = None
         else:
-            if current_price >= self.swing_high or current_price <= (pos.avg_price * 0.99):
+            sl = getattr(self, "stop_price", self.swing_high)
+            tp = getattr(self, "target_price", pos.avg_price * 0.99 if hasattr(pos, 'avg_price') else None)
+            if (sl and current_price >= sl) or (tp and current_price <= tp):
                 order = self.create_order(symbol, abs(pos.quantity), "buy")
                 self.submit_order(order)
+                self.stop_price = None
+                self.target_price = None

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>Gotti Visualize — Quantitative Strategy Hub & Backtester</title>
+    <title>Gotti Visualize — Quantitative Strategy Hub &amp; Backtester</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -14,6 +14,7 @@
                         dark: {
                             bg: '#020617',
                             card: '#0f172a',
+                            panel: '#0a1628',
                             border: 'rgba(51,65,85,0.7)',
                             hover: '#1e293b',
                             text: '#f8fafc',
@@ -24,8 +25,17 @@
                             green: '#22c55e',
                             red: '#ef4444',
                             gold: '#f59e0b',
-                            purple: '#a855f7'
+                            purple: '#a855f7',
+                            blue: '#3b82f6',
                         }
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'spin-slow': 'spin 1.5s linear infinite',
+                        'fade-in': 'fadeIn 0.35s ease-out',
+                    },
+                    keyframes: {
+                        fadeIn: { '0%': { opacity: 0 }, '100%': { opacity: 1 } },
                     }
                 }
             }
@@ -33,16 +43,87 @@
     </script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #020617; color: #f8fafc; }
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #0f172a; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #0a1628; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        .glass-card {
+            background: linear-gradient(135deg, rgba(15,23,42,0.95) 0%, rgba(10,22,40,0.90) 100%);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(51,65,85,0.6);
+        }
+        .glass-card-hover:hover {
+            border-color: rgba(6,182,212,0.3);
+            box-shadow: 0 0 0 1px rgba(6,182,212,0.15), 0 8px 32px rgba(6,182,212,0.06);
+            transition: all 0.2s ease;
+        }
+
+        .metric-card { position: relative; overflow: hidden; }
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, transparent 60%, rgba(6,182,212,0.04));
+            pointer-events: none;
+        }
+
+        @keyframes stepPop {
+            0%   { opacity: 0; transform: translateX(-8px); }
+            100% { opacity: 1; transform: translateX(0); }
+        }
+        .step-animate { animation: stepPop 0.25s ease-out forwards; }
+
+        @keyframes spinnerRotate { to { transform: rotate(360deg); } }
+        .spinner { animation: spinnerRotate 0.9s linear infinite; }
+
+        #toast {
+            position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 9999;
+            min-width: 280px; max-width: 420px;
+            transform: translateY(120%);
+            transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        #toast.show { transform: translateY(0); }
+
+        .header-gradient {
+            background: linear-gradient(90deg, rgba(6,182,212,0.08) 0%, transparent 60%);
+            border-bottom: 1px solid rgba(6,182,212,0.15);
+        }
+
+        .fib-key { color: #f59e0b; }
+        .fib-regular { color: #06b6d4; }
+
+        input:focus, select:focus {
+            box-shadow: 0 0 0 2px rgba(6,182,212,0.25);
+        }
+
+        tbody tr:hover td { background: rgba(30,41,59,0.5); }
+
+        .sr-support { background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.3); color: #22c55e; }
+        .sr-resistance { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.3); color: #ef4444; }
+
+        .hidden { display: none !important; }
+
+        @keyframes dbPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .db-live { animation: dbPulse 2s ease-in-out infinite; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col bg-dark-bg text-dark-text">
 
+    <!-- Toast Notification -->
+    <div id="toast" class="glass-card rounded-xl p-4 shadow-2xl flex items-start gap-3">
+        <div id="toast-icon" class="text-xl flex-shrink-0 mt-0.5">⚠️</div>
+        <div class="flex-1 min-w-0">
+            <div id="toast-title" class="font-bold text-sm text-white mb-0.5">Error</div>
+            <div id="toast-msg" class="text-xs text-dark-muted leading-relaxed break-words"></div>
+        </div>
+        <button onclick="hideToast()" class="text-dark-muted hover:text-white text-lg flex-shrink-0 leading-none">×</button>
+    </div>
+
     <!-- Top Navbar -->
-    <header class="border-b border-dark-border bg-dark-card/90 backdrop-blur sticky top-0 z-30 px-4 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
+    <header class="header-gradient sticky top-0 z-30 px-4 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
         <div class="flex items-center gap-3">
             <div class="h-9 w-9 rounded-xl bg-accent-cyan/15 border border-accent-cyan/30 flex items-center justify-center text-xl shadow-inner text-accent-cyan">
                 📈
@@ -52,47 +133,56 @@
                     <h1 class="text-lg font-bold tracking-tight text-white">Gotti Visualize</h1>
                     <span class="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30 font-bold">Strategy Hub</span>
                 </div>
-                <p class="text-xs text-dark-muted">Lumibot Execution, Multi-Timeframe Key Levels, Fibonacci & Quant Backtesting</p>
+                <p class="text-xs text-dark-muted">Lumibot Execution · Multi-Timeframe Key Levels · Fibonacci &amp; Quant Backtesting</p>
             </div>
         </div>
 
-        <div class="flex items-center gap-2.5 sm:gap-3">
+        <div class="flex items-center gap-2 sm:gap-2.5 flex-wrap">
             <a href="/chart" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-accent-cyan/15 hover:bg-accent-cyan/25 border border-accent-cyan/40 text-accent-cyan transition-colors flex items-center gap-1.5">
                 <span>📊 Interactive Chart</span>
             </a>
             <a href="/docs" target="_blank" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-hover hover:bg-slate-800 border border-dark-border text-dark-text transition-colors">
                 Swagger Docs
             </a>
-            <a href="http://localhost:10000/evaluate" target="_blank" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-hover hover:bg-slate-800 border border-dark-border text-dark-text transition-colors">
+            <a href="#" data-port="10000" data-path="/evaluate" target="_blank" class="ecosystem-link px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-hover hover:bg-slate-800 border border-dark-border text-indigo-400 transition-colors">
                 Ticker Evaluator
             </a>
-            <a href="http://localhost:8080/" target="_blank" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-hover hover:bg-slate-800 border border-dark-border text-dark-text transition-colors">
+            <a href="#" data-port="8080" data-path="/" target="_blank" class="ecosystem-link px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-hover hover:bg-slate-800 border border-dark-border text-dark-text transition-colors">
                 Stock Alchemist
+            </a>
+            <a href="#" data-port="3000" data-path="/" target="_blank" class="ecosystem-link px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                Client App
+            </a>
+            <a href="#" data-port="5000" data-path="/" target="_blank" class="ecosystem-link px-3 py-1.5 rounded-lg text-xs font-medium bg-dark-hover hover:bg-slate-800 border border-dark-border text-emerald-400 transition-colors">
+                Grams
             </a>
         </div>
     </header>
 
     <!-- Main Workspace -->
-    <main class="flex-1 px-4 lg:px-8 py-6 max-w-7xl w-full mx-auto space-y-6">
+    <main class="flex-1 px-4 lg:px-8 py-6 max-w-[1400px] w-full mx-auto space-y-5">
 
-        <!-- Strategy Control Panel -->
-        <section class="bg-dark-card border border-dark-border rounded-xl p-5 shadow-sm space-y-4">
+        <!-- ── Strategy Control Panel ── -->
+        <section class="glass-card rounded-xl p-5 shadow-lg space-y-4">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-dark-border pb-3">
                 <div>
-                    <h2 class="text-sm font-bold text-white uppercase tracking-wider">Strategy Execution & Backtest Parameters</h2>
-                    <p class="text-xs text-dark-muted">Select quantitative strategy model, configure execution constraints, and run backtest simulations</p>
+                    <h2 class="text-sm font-bold text-white uppercase tracking-wider">Strategy Execution &amp; Backtest Parameters</h2>
+                    <p class="text-xs text-dark-muted">Select quantitative strategy model, configure execution constraints, and run real backtests</p>
                 </div>
-                <div class="flex items-center gap-2">
-                    <span class="text-xs text-dark-muted font-mono">Engine:</span>
-                    <span class="text-xs font-mono font-bold text-accent-green px-2 py-0.5 rounded bg-accent-green/10 border border-accent-green/30">Lumibot + Pandas Ready</span>
+                <div class="flex items-center gap-3">
+                    <div id="db-status-badge" class="flex items-center gap-1.5 text-xs font-mono text-dark-muted">
+                        <span class="w-2 h-2 rounded-full bg-accent-green db-live"></span>
+                        <span id="db-status-badge-text">Connecting to MySQL...</span>
+                    </div>
+                    <span class="text-xs font-mono font-bold text-accent-green px-2 py-0.5 rounded bg-accent-green/10 border border-accent-green/30">Lumibot Engine Active</span>
                 </div>
             </div>
 
-            <div class="grid sm:grid-cols-12 gap-3 sm:gap-4 items-end text-xs">
+            <div class="grid sm:grid-cols-12 gap-3 items-end text-xs">
                 <!-- Strategy Selection -->
                 <div class="sm:col-span-4">
                     <label class="block font-medium text-dark-muted mb-1.5">Quantitative Strategy Model</label>
-                    <select id="strategy-select" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white font-medium focus:border-accent-cyan focus:outline-none" onchange="updateStrategyDesc()">
+                    <select id="strategy-select" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2.5 text-white font-medium focus:border-accent-cyan focus:outline-none transition-all" onchange="updateStrategyDesc()">
                         <option value="multi_tf_strategy" selected>Multi-Timeframe Key Levels (S/R + Fibonacci)</option>
                         <option value="long_trend_high_momentum">Long Trend High Momentum (Level 2/3)</option>
                         <option value="long_mean_reversion_high_adx">Long Mean Reversion High ADX Reversal</option>
@@ -107,13 +197,15 @@
                 <!-- Target Ticker -->
                 <div class="sm:col-span-2">
                     <label class="block font-medium text-dark-muted mb-1.5">Target Ticker</label>
-                    <input type="text" id="ticker-input" value="NVDA" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 font-mono uppercase font-bold text-white focus:border-accent-cyan focus:outline-none" />
+                    <input type="text" id="ticker-input" value="NVDA" placeholder="e.g. NVDA"
+                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2.5 font-mono uppercase font-bold text-white focus:border-accent-cyan focus:outline-none transition-all"
+                        onkeydown="if(event.key==='Enter') runStrategyBacktest()" />
                 </div>
 
                 <!-- Lookback Window -->
                 <div class="sm:col-span-2">
                     <label class="block font-medium text-dark-muted mb-1.5">Lookback Window</label>
-                    <select id="lookback-select" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white font-medium focus:border-accent-cyan focus:outline-none">
+                    <select id="lookback-select" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2.5 text-white font-medium focus:border-accent-cyan focus:outline-none transition-all">
                         <option value="30">30 Days</option>
                         <option value="90">90 Days</option>
                         <option value="180" selected>180 Days (6M)</option>
@@ -124,7 +216,7 @@
                 <!-- Initial Capital -->
                 <div class="sm:col-span-2">
                     <label class="block font-medium text-dark-muted mb-1.5">Initial Capital</label>
-                    <select id="capital-select" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white font-medium focus:border-accent-cyan focus:outline-none">
+                    <select id="capital-select" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2.5 text-white font-medium focus:border-accent-cyan focus:outline-none transition-all">
                         <option value="25000">$25,000</option>
                         <option value="50000">$50,000</option>
                         <option value="100000" selected>$100,000</option>
@@ -134,73 +226,199 @@
 
                 <!-- Run Button -->
                 <div class="sm:col-span-2">
-                    <button onclick="runStrategy()" id="btn-run" class="w-full py-2 bg-accent-cyan hover:bg-cyan-400 text-dark-bg font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow transition-all">
-                        <span>⚡ Run Strategy</span>
+                    <button onclick="runStrategyBacktest()" id="btn-run"
+                        class="w-full py-2.5 bg-accent-cyan hover:bg-cyan-400 active:scale-95 text-dark-bg font-bold rounded-lg text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition-all duration-150">
+                        <svg id="btn-spinner" class="spinner w-3.5 h-3.5 hidden" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                        </svg>
+                        <span id="btn-label">⚡ Run Backtest</span>
                     </button>
                 </div>
             </div>
 
             <!-- Strategy Description Callout -->
-            <div id="strategy-desc-box" class="bg-dark-bg border border-dark-border/80 rounded-lg p-3 text-xs text-dark-muted leading-relaxed">
-                <strong class="text-white">Strategy Mechanics:</strong> <span id="strategy-desc-text">Detects automated multi-timeframe Support & Resistance key levels (1D, 4H, 15m) combined with Fibonacci retracement (0.236, 0.382, 0.500, 0.618, 0.786) to identify high-probability institutional inflection setups.</span>
+            <div id="strategy-desc-box" class="bg-dark-bg/70 border border-dark-border/60 rounded-lg p-3 text-xs text-dark-muted leading-relaxed">
+                <span class="text-accent-cyan font-bold mr-1">Strategy Mechanics:</span>
+                <span id="strategy-desc-text">Detects automated multi-timeframe Support &amp; Resistance key levels (1D, 4H, 15m) combined with Fibonacci retracement (0.236, 0.382, 0.500, 0.618, 0.786) to identify high-probability institutional inflection setups.</span>
             </div>
         </section>
 
-        <!-- Backtest Performance & Results Dashboard -->
-        <section id="results-section" class="space-y-6">
-            
+        <!-- ── Database & Execution Provenance Banner ── -->
+        <section id="provenance-banner" class="hidden glass-card rounded-xl p-4 shadow-sm border border-accent-cyan/20">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <div class="flex items-center gap-3">
+                    <div class="h-8 w-8 rounded-lg bg-accent-cyan/10 border border-accent-cyan/30 flex items-center justify-center text-accent-cyan font-bold">
+                        🗄️
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold text-white">Candle Data Provenance:</span>
+                            <span id="provenance-source" class="font-mono text-accent-cyan font-semibold">MySQL Database</span>
+                        </div>
+                        <p class="text-dark-muted text-[11px]" id="provenance-details">Loaded candles from local warehouse</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3 font-mono text-[11px]">
+                    <div class="bg-dark-bg px-2.5 py-1 rounded border border-dark-border">
+                        <span class="text-dark-muted">Candles: </span>
+                        <span class="text-white font-bold" id="provenance-candles-count">0</span>
+                    </div>
+                    <div class="bg-dark-bg px-2.5 py-1 rounded border border-dark-border">
+                        <span class="text-dark-muted">Period: </span>
+                        <span class="text-accent-gold font-bold" id="provenance-dates">—</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── Strategy Process & Execution Progress Panel ── -->
+        <section id="process-panel" class="glass-card rounded-xl p-5 shadow-lg space-y-3">
+            <div class="flex items-center justify-between border-b border-dark-border pb-2.5">
+                <div class="flex items-center gap-2">
+                    <span class="text-sm">⚙️</span>
+                    <h3 class="text-xs font-bold text-white uppercase tracking-wider">Strategy Execution Process</h3>
+                </div>
+                <span class="text-[10px] font-mono text-dark-muted" id="process-timer">Ready</span>
+            </div>
+
+            <!-- Animated Progress Bar -->
+            <div class="h-1.5 bg-dark-bg rounded-full overflow-hidden">
+                <div id="process-progress-bar" class="h-full bg-gradient-to-r from-accent-cyan to-accent-blue rounded-full transition-all duration-300" style="width: 100%;"></div>
+            </div>
+
+            <!-- Process Step Log -->
+            <div id="process-log-list" class="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar text-xs font-mono">
+                <div class="text-dark-muted text-[11px]">Ready to execute quantitative backtesting. Click "Run Backtest" above to start.</div>
+            </div>
+        </section>
+
+        <!-- ── Error Panel ── -->
+        <section id="error-panel" class="hidden glass-card border border-accent-red/40 rounded-xl p-5 shadow-lg">
+            <div class="flex items-start gap-3">
+                <span class="text-2xl flex-shrink-0">🚨</span>
+                <div class="flex-1 min-w-0">
+                    <h3 class="text-sm font-bold text-accent-red mb-1" id="error-title">Backtest Execution Failed</h3>
+                    <p class="text-xs text-dark-muted leading-relaxed mb-3" id="error-message"></p>
+                    <div id="error-detail-box" class="hidden bg-dark-bg rounded-lg p-3 text-xs font-mono text-dark-muted max-h-36 overflow-y-auto custom-scrollbar whitespace-pre-wrap"></div>
+                </div>
+                <button onclick="document.getElementById('error-panel').classList.add('hidden')" class="text-dark-muted hover:text-white text-lg flex-shrink-0 leading-none">×</button>
+            </div>
+        </section>
+
+        <!-- ── Backtest Performance Dashboard ── -->
+        <section id="results-section" class="space-y-5">
+
+            <!-- Results Subheader -->
+            <div class="flex items-center justify-between gap-3 px-1">
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="w-2 h-2 rounded-full bg-accent-green animate-pulse-slow"></span>
+                    <span class="text-dark-muted font-mono">Strategy results for</span>
+                    <span class="text-white font-bold font-mono text-sm" id="result-ticker-label">NVDA</span>
+                    <span class="text-dark-muted">·</span>
+                    <span class="text-accent-cyan font-mono" id="result-strategy-label">Multi-Timeframe Strategy</span>
+                </div>
+                <button onclick="viewInChart()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-accent-cyan/15 hover:bg-accent-cyan/25 border border-accent-cyan/40 text-accent-cyan transition-colors flex items-center gap-1.5">
+                    <span>Open Candlestick Chart for <span id="current-ticker-label">NVDA</span></span>
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                </button>
+            </div>
+
             <!-- Key Metric Performance Cards -->
             <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                <div class="bg-dark-card border border-dark-border rounded-xl p-4 shadow-sm">
+                <div class="metric-card glass-card glass-card-hover rounded-xl p-4 shadow-sm">
                     <span class="text-[11px] text-dark-muted font-medium uppercase tracking-wider block mb-1">Strategy Return</span>
-                    <div class="text-xl font-bold font-mono text-accent-green" id="metric-return">+28.4%</div>
-                    <span class="text-[10px] text-dark-muted mt-0.5 block">vs S&P 500 (+14.2%)</span>
+                    <div class="text-2xl font-bold font-mono text-accent-green" id="metric-return">+0.0%</div>
+                    <span class="text-[10px] text-dark-muted mt-0.5 block" id="metric-return-sub">Portfolio Net Gain</span>
                 </div>
-                <div class="bg-dark-card border border-dark-border rounded-xl p-4 shadow-sm">
+
+                <div class="metric-card glass-card glass-card-hover rounded-xl p-4 shadow-sm">
                     <span class="text-[11px] text-dark-muted font-medium uppercase tracking-wider block mb-1">Win Rate</span>
-                    <div class="text-xl font-bold font-mono text-white" id="metric-winrate">68.5%</div>
-                    <span class="text-[10px] text-dark-muted mt-0.5 block" id="metric-trades-count">38 Closed Trades</span>
+                    <div class="text-2xl font-bold font-mono text-white" id="metric-winrate">0.0%</div>
+                    <span class="text-[10px] text-dark-muted mt-0.5 block" id="metric-trades-count">0 Closed Trades</span>
                 </div>
-                <div class="bg-dark-card border border-dark-border rounded-xl p-4 shadow-sm">
+
+                <div class="metric-card glass-card glass-card-hover rounded-xl p-4 shadow-sm">
                     <span class="text-[11px] text-dark-muted font-medium uppercase tracking-wider block mb-1">Profit Factor</span>
-                    <div class="text-xl font-bold font-mono text-accent-cyan" id="metric-profit-factor">2.45</div>
+                    <div class="text-2xl font-bold font-mono text-accent-cyan" id="metric-profit-factor">0.00</div>
                     <span class="text-[10px] text-dark-muted mt-0.5 block">Gross Win / Loss</span>
                 </div>
-                <div class="bg-dark-card border border-dark-border rounded-xl p-4 shadow-sm">
+
+                <div class="metric-card glass-card glass-card-hover rounded-xl p-4 shadow-sm">
                     <span class="text-[11px] text-dark-muted font-medium uppercase tracking-wider block mb-1">Sharpe Ratio</span>
-                    <div class="text-xl font-bold font-mono text-accent-gold" id="metric-sharpe">1.82</div>
+                    <div class="text-2xl font-bold font-mono text-accent-gold" id="metric-sharpe">0.00</div>
                     <span class="text-[10px] text-dark-muted mt-0.5 block">Risk-Adjusted Alpha</span>
                 </div>
-                <div class="bg-dark-card border border-dark-border rounded-xl p-4 shadow-sm">
+
+                <div class="metric-card glass-card glass-card-hover rounded-xl p-4 shadow-sm">
                     <span class="text-[11px] text-dark-muted font-medium uppercase tracking-wider block mb-1">Max Drawdown</span>
-                    <div class="text-xl font-bold font-mono text-accent-red" id="metric-drawdown">-8.6%</div>
+                    <div class="text-2xl font-bold font-mono text-accent-red" id="metric-drawdown">-0.0%</div>
                     <span class="text-[10px] text-dark-muted mt-0.5 block">Peak-to-Trough</span>
                 </div>
-                <div class="bg-dark-card border border-dark-border rounded-xl p-4 shadow-sm">
+
+                <div class="metric-card glass-card glass-card-hover rounded-xl p-4 shadow-sm">
                     <span class="text-[11px] text-dark-muted font-medium uppercase tracking-wider block mb-1">Ending Capital</span>
-                    <div class="text-xl font-bold font-mono text-white" id="metric-capital">$128,400</div>
-                    <span class="text-[10px] text-dark-muted mt-0.5 block">From $100,000 seed</span>
+                    <div class="text-2xl font-bold font-mono text-white" id="metric-capital">$100,000</div>
+                    <span class="text-[10px] text-dark-muted mt-0.5 block" id="metric-capital-seed">From $100,000 seed</span>
                 </div>
             </div>
 
-            <!-- Trade Setups & Key Levels Table -->
-            <div class="bg-dark-card border border-dark-border rounded-xl p-5 shadow-sm space-y-4">
+            <!-- Executed Trades Log Table -->
+            <div class="glass-card rounded-xl p-5 shadow-lg space-y-4">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-dark-border pb-3">
                     <div>
                         <h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                            <span>🎯</span> Active Trade Setups & Multi-Timeframe Inflections
+                            <span>📜</span> Simulated Executed Trades Log
+                        </h3>
+                        <p class="text-xs text-dark-muted">Historical trade orders filled during backtest with entry, exit, stop-loss/take-profit, and PnL</p>
+                    </div>
+                    <span class="text-xs font-mono text-dark-muted bg-dark-bg px-2.5 py-1 rounded-lg border border-dark-border" id="trades-count-badge">
+                        0 Trades
+                    </span>
+                </div>
+
+                <div class="overflow-x-auto custom-scrollbar -mx-1">
+                    <table class="w-full text-left text-xs min-w-[760px]">
+                        <thead class="border-b border-dark-border text-dark-muted uppercase font-mono text-[10px] tracking-wider">
+                            <tr>
+                                <th class="py-2.5 px-3">#</th>
+                                <th class="py-2.5 px-3">Side</th>
+                                <th class="py-2.5 px-3">Entry Date</th>
+                                <th class="py-2.5 px-3">Exit Date</th>
+                                <th class="py-2.5 px-3">Entry Price</th>
+                                <th class="py-2.5 px-3">Exit Price</th>
+                                <th class="py-2.5 px-3">Quantity</th>
+                                <th class="py-2.5 px-3">PnL ($)</th>
+                                <th class="py-2.5 px-3">Return (%)</th>
+                                <th class="py-2.5 px-3">Exit Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-table-body" class="divide-y divide-dark-border/40 font-mono">
+                            <tr>
+                                <td colspan="10" class="py-8 text-center text-dark-muted">No simulated trades yet. Click "Run Backtest" above to execute.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Active Trade Setups Table -->
+            <div class="glass-card rounded-xl p-5 shadow-lg space-y-4">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-dark-border pb-3">
+                    <div>
+                        <h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                            <span>🎯</span> Active Trade Setups &amp; Multi-Timeframe Inflections
                         </h3>
                         <p class="text-xs text-dark-muted">Calculated key levels, Fibonacci bands, entry triggers, stop-loss, and take-profit targets</p>
                     </div>
-                    <button onclick="viewInChart()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-accent-cyan/15 hover:bg-accent-cyan/25 border border-accent-cyan/40 text-accent-cyan transition-colors flex items-center gap-1.5">
-                        <span>Open Candlestick Chart for <span id="current-ticker-label">NVDA</span></span>
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-                    </button>
+                    <span class="text-xs font-mono text-dark-muted bg-dark-bg px-2.5 py-1 rounded-lg border border-dark-border">
+                        <span id="setups-count">0</span> Active Setups
+                    </span>
                 </div>
 
-                <div class="overflow-x-auto custom-scrollbar">
-                    <table class="w-full text-left text-xs">
-                        <thead class="border-b border-dark-border text-dark-muted uppercase font-mono">
+                <div class="overflow-x-auto custom-scrollbar -mx-1">
+                    <table class="w-full text-left text-xs min-w-[720px]">
+                        <thead class="border-b border-dark-border text-dark-muted uppercase font-mono text-[10px] tracking-wider">
                             <tr>
                                 <th class="py-2.5 px-3">Pattern / Setup</th>
                                 <th class="py-2.5 px-3">Trend Direction</th>
@@ -212,33 +430,55 @@
                                 <th class="py-2.5 px-3">Fibonacci Range</th>
                             </tr>
                         </thead>
-                        <tbody id="setups-table-body" class="divide-y divide-dark-border/60">
+                        <tbody id="setups-table-body" class="divide-y divide-dark-border/40">
                             <tr>
-                                <td colspan="8" class="py-6 text-center text-dark-muted">Loading quantitative setups...</td>
+                                <td colspan="8" class="py-8 text-center text-dark-muted">Loading quantitative setups...</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
             </div>
 
-            <!-- Multi-Timeframe S/R Levels Overview -->
+            <!-- S/R Levels & Fibonacci Grid -->
             <div class="grid sm:grid-cols-2 gap-4">
-                <div class="bg-dark-card border border-dark-border rounded-xl p-5 shadow-sm space-y-3">
-                    <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                        <span>🛡️</span> Detected Support & Resistance Zones
-                    </h4>
-                    <div id="sr-levels-list" class="space-y-2 text-xs font-mono">
-                        <div class="text-dark-muted">Analyzing institutional order blocks...</div>
+                <!-- S/R Zones -->
+                <div class="glass-card rounded-xl p-5 shadow-lg space-y-3">
+                    <div class="flex items-center justify-between border-b border-dark-border pb-2.5">
+                        <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                            <span>🛡️</span> Detected Support &amp; Resistance Zones
+                        </h4>
+                        <span class="text-[10px] font-mono text-dark-muted bg-dark-bg px-2 py-0.5 rounded border border-dark-border" id="sr-count-badge">0 zones</span>
+                    </div>
+                    <div id="sr-levels-list" class="space-y-1.5 text-xs font-mono max-h-72 overflow-y-auto custom-scrollbar">
+                        <div class="text-dark-muted text-center py-4">Analyzing institutional order blocks...</div>
                     </div>
                 </div>
 
-                <div class="bg-dark-card border border-dark-border rounded-xl p-5 shadow-sm space-y-3">
-                    <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                        <span>📐</span> Fibonacci Retracement Grid (0.000 – 1.000)
-                    </h4>
-                    <div id="fib-grid-list" class="space-y-2 text-xs font-mono">
-                        <div class="text-dark-muted">Calculating Fibonacci golden ratios...</div>
+                <!-- Fibonacci Retracement Grid -->
+                <div class="glass-card rounded-xl p-5 shadow-lg space-y-3">
+                    <div class="flex items-center justify-between border-b border-dark-border pb-2.5">
+                        <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                            <span>📐</span> Fibonacci Retracement Grid (0.000 – 1.000)
+                        </h4>
+                        <div id="fib-tabs" class="flex gap-1"></div>
                     </div>
+                    <div id="fib-grid-list" class="space-y-1.5 text-xs font-mono max-h-72 overflow-y-auto custom-scrollbar">
+                        <div class="text-dark-muted text-center py-4">Calculating Fibonacci golden ratios...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Database Inspector Panel -->
+            <div class="glass-card rounded-xl p-5 shadow-lg space-y-3">
+                <div class="flex items-center justify-between border-b border-dark-border pb-2.5">
+                    <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                        <span>🗄️</span> Shared MySQL Database (`gotti`)
+                        <span class="w-1.5 h-1.5 rounded-full bg-accent-green db-live"></span>
+                    </h4>
+                    <span class="text-[10px] font-mono text-accent-green bg-accent-green/10 border border-accent-green/20 px-2 py-0.5 rounded" id="db-summary-badge">Connected</span>
+                </div>
+                <div id="db-tables-list" class="text-xs text-dark-muted">
+                    <div class="text-center py-4">Loading database tables...</div>
                 </div>
             </div>
 
@@ -247,157 +487,441 @@
     </main>
 
     <!-- Footer -->
-    <footer class="border-t border-dark-border py-4 px-4 text-center text-xs text-dark-muted bg-dark-card/50">
-        Gotti Visualize · Lumibot Quantitative Strategy Engine · Chart & S/R Analytics
+    <footer class="border-t border-dark-border/50 py-4 px-4 text-center text-xs text-dark-muted bg-dark-card/30 mt-4">
+        <span class="text-accent-cyan/80">Gotti Visualize</span> · Lumibot Quantitative Strategy Engine · Real-time S/R Analytics · MySQL Institutional Candlestick Feed
     </footer>
 
     <script>
-        const descriptions = {
+        const STRATEGY_DESCS = {
             'multi_tf_strategy': 'Detects automated multi-timeframe Support & Resistance key levels (1D, 4H, 15m) combined with Fibonacci retracement (0.236, 0.382, 0.500, 0.618, 0.786) to identify high-probability institutional inflection setups.',
-            'long_trend_high_momentum': 'Systematic momentum breakout strategy tailored for Level 2 and Level 3 ETF Vaults. Enters when 20-day high breaks with volume expansion above 1.5x 50-day SMA.',
-            'long_mean_reversion_high_adx': 'Exploits severe temporary selloffs in high-ADX trending assets. Enters on 2-period RSI oversold (<10) with reversion to 10-day EMA.',
+            'long_trend_high_momentum': 'Systematic momentum breakout strategy tailored for Level 2 and Level 3 ETF Vaults. Enters when 20-day high breaks with volume expansion above 1.5× 50-day SMA.',
+            'long_mean_reversion_high_adx': 'Exploits severe temporary selloffs in high-ADX trending assets. Enters on 2-period RSI oversold (<30) with reversion to 10-day EMA.',
             'long_trend_low_volatility': 'Conservative defensive strategy for Level 1 Boomer Haven ETF. Invests in low-beta dividend champions with quarterly rebalancing.',
             'opening_gap': 'Captures overnight earnings and macro imbalances at market open with strict gap-fade or momentum-continuation rules.',
             'short_mean_reversion_surge': 'Tactical hedge identifying over-extended 6-day exponential parabolic price surges with statistical mean reversion targets.',
-            'short_rsi_thrust': 'Short-side momentum reversal triggering on exhaustion thrusts where daily RSI exceeds 82 with volume divergence.',
+            'short_rsi_thrust': 'Short-side momentum reversal triggering on exhaustion thrusts where daily RSI exceeds 70 with volume divergence.',
             'the_catastrophe_hedge': 'Tail-risk hedging framework utilizing dynamic inverse volatility allocations during systemic market pullbacks.'
         };
 
         function updateStrategyDesc() {
             const key = document.getElementById('strategy-select').value;
-            document.getElementById('strategy-desc-text').textContent = descriptions[key] || descriptions['multi_tf_strategy'];
+            document.getElementById('strategy-desc-text').textContent = STRATEGY_DESCS[key] || STRATEGY_DESCS['multi_tf_strategy'];
         }
 
         function viewInChart() {
-            const ticker = document.getElementById('ticker-input').value.trim().toUpperCase();
+            const ticker = document.getElementById('ticker-input').value.trim().toUpperCase() || 'NVDA';
             window.location.href = `/chart?ticker=${ticker}`;
         }
 
-        async function runStrategy() {
-            const ticker = document.getElementById('ticker-input').value.trim().toUpperCase() || 'NVDA';
-            document.getElementById('current-ticker-label').textContent = ticker;
+        // ── Toast ─────────────────────────────────────────────────────────────
+        let _toastTimer = null;
+        function showToast(title, msg, type = 'error') {
+            const icons = { error: '🚨', warn: '⚠️', success: '✅', info: 'ℹ️' };
+            document.getElementById('toast-icon').textContent = icons[type] || '⚠️';
+            document.getElementById('toast-title').textContent = title;
+            document.getElementById('toast-msg').textContent = msg;
+            document.getElementById('toast').classList.add('show');
+            if (_toastTimer) clearTimeout(_toastTimer);
+            _toastTimer = setTimeout(hideToast, type === 'error' ? 8000 : 4000);
+        }
+        function hideToast() {
+            document.getElementById('toast').classList.remove('show');
+        }
 
+        // ── Error Panel ───────────────────────────────────────────────────────
+        function showError(title, message, detail = null) {
+            document.getElementById('error-title').textContent = title;
+            document.getElementById('error-message').textContent = message;
+            const box = document.getElementById('error-detail-box');
+            if (detail) {
+                box.textContent = detail;
+                box.classList.remove('hidden');
+            } else {
+                box.classList.add('hidden');
+            }
+            document.getElementById('error-panel').classList.remove('hidden');
+            showToast(title, message, 'error');
+        }
+
+        // ── Process Log ───────────────────────────────────────────────────────
+        function clearProcessLog() {
+            document.getElementById('process-log-list').innerHTML = '';
+            document.getElementById('process-progress-bar').style.width = '10%';
+        }
+
+        function addProcessStep(text, status = 'ok', time = null) {
+            const icons = { ok: '✓', warn: '⚠', err: '✗', wait: '…', info: '○' };
+            const colors = { ok: 'text-accent-green', warn: 'text-accent-gold', err: 'text-accent-red', wait: 'text-accent-cyan', info: 'text-dark-muted' };
+            const timeStr = time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            const row = document.createElement('div');
+            row.className = `flex items-center gap-2 step-animate ${colors[status] || 'text-dark-muted'}`;
+            row.innerHTML = `<span class="text-dark-muted text-[10px] w-14 flex-shrink-0">${timeStr}</span><span class="flex-shrink-0 font-bold">${icons[status] || '○'}</span><span class="flex-1">${escHtml(text)}</span>`;
+
+            const list = document.getElementById('process-log-list');
+            list.appendChild(row);
+            list.scrollTop = list.scrollHeight;
+        }
+
+        // ── Button state ──────────────────────────────────────────────────────
+        function setBtnLoading(loading) {
             const btn = document.getElementById('btn-run');
-            btn.disabled = true;
-            btn.innerHTML = `<span>⏳ Analyzing...</span>`;
-
-            try {
-                const resp = await fetch(`/chart/key-levels?ticker=${ticker}`);
-                if (!resp.ok) {
-                    throw new Error('Failed to load key levels');
-                }
-                const data = await resp.json();
-                renderStrategyResults(data, ticker);
-            } catch (err) {
-                console.error("Strategy error:", err);
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = `<span>⚡ Run Strategy</span>`;
+            const spinner = document.getElementById('btn-spinner');
+            const label = document.getElementById('btn-label');
+            btn.disabled = loading;
+            if (loading) {
+                spinner.classList.remove('hidden');
+                label.textContent = 'Simulating...';
+                btn.classList.add('opacity-75', 'cursor-not-allowed');
+            } else {
+                spinner.classList.add('hidden');
+                label.textContent = '⚡ Run Backtest';
+                btn.classList.remove('opacity-75', 'cursor-not-allowed');
             }
         }
 
-        function renderStrategyResults(data, ticker) {
+        // ── Check DB on Startup ───────────────────────────────────────────────
+        async function checkDatabase() {
+            try {
+                const resp = await fetch('/db-data');
+                if (resp.ok) {
+                    const res = await resp.json();
+                    const tables = res.data?.tables || [];
+                    document.getElementById('db-status-badge-text').textContent = `MySQL Connected · ${tables.length} Tables`;
+                    renderDBPanel(res.data);
+                } else {
+                    document.getElementById('db-status-badge-text').textContent = 'MySQL Offline';
+                }
+            } catch (e) {
+                document.getElementById('db-status-badge-text').textContent = 'MySQL Unreachable';
+            }
+        }
+
+        // ── Run Strategy Backtest (Real Engine) ───────────────────────────────
+        async function runStrategyBacktest() {
+            const ticker = (document.getElementById('ticker-input').value.trim().toUpperCase() || 'NVDA');
+            const strategy = document.getElementById('strategy-select').value;
+            const lookback = parseInt(document.getElementById('lookback-select').value);
+            const capital = parseFloat(document.getElementById('capital-select').value);
+
+            document.getElementById('current-ticker-label').textContent = ticker;
+            document.getElementById('result-ticker-label').textContent = ticker;
+            const stratLabel = document.getElementById('strategy-select').options[document.getElementById('strategy-select').selectedIndex].text;
+            document.getElementById('result-strategy-label').textContent = stratLabel;
+
+            document.getElementById('error-panel').classList.add('hidden');
+            setBtnLoading(true);
+            clearProcessLog();
+
+            const startTime = Date.now();
+            document.getElementById('process-timer').textContent = 'Running...';
+            document.getElementById('process-progress-bar').style.width = '30%';
+
+            addProcessStep(`Starting backtest simulation for ${ticker} (${stratLabel})`, 'info');
+            addProcessStep(`Lookback window: ${lookback} days · Seed capital: $${capital.toLocaleString()}`, 'info');
+
+            try {
+                addProcessStep('Querying MySQL candlestick warehouse & running Lumibot strategy...', 'wait');
+                document.getElementById('process-progress-bar').style.width = '65%';
+
+                const url = `/chart/backtest?ticker=${encodeURIComponent(ticker)}&strategy=${encodeURIComponent(strategy)}&lookback_days=${lookback}&capital=${capital}`;
+                const resp = await fetch(url);
+
+                if (!resp.ok) {
+                    let errMsg = `Server returned HTTP ${resp.status}`;
+                    try {
+                        const errJson = await resp.json();
+                        errMsg = errJson.detail || errMsg;
+                    } catch {}
+                    throw new Error(errMsg);
+                }
+
+                const data = await resp.json();
+                document.getElementById('process-progress-bar').style.width = '90%';
+
+                // Render logs from server
+                if (data.process_log && Array.isArray(data.process_log)) {
+                    data.process_log.forEach(item => {
+                        addProcessStep(item.message, item.status, item.time);
+                    });
+                }
+
+                renderBacktestResults(data, ticker, capital);
+
+                document.getElementById('process-progress-bar').style.width = '100%';
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+                document.getElementById('process-timer').textContent = `Done in ${elapsed}s`;
+                addProcessStep(`Backtest complete! Rendered ${data.trades?.length || 0} simulated trades.`, 'ok');
+
+            } catch (err) {
+                console.error("Backtest error:", err);
+                document.getElementById('process-progress-bar').style.width = '100%';
+                document.getElementById('process-timer').textContent = 'Failed';
+                addProcessStep(`Execution error: ${err.message}`, 'err');
+                showError('Backtest Execution Failed', `Could not complete backtest for ${ticker}. ${err.message}`, err.stack);
+            } finally {
+                setBtnLoading(false);
+            }
+        }
+
+        // ── Render Backtest Results ───────────────────────────────────────────
+        function renderBacktestResults(data, ticker, seedCapital) {
+            const metrics = data.metrics || {};
+            const trades = data.trades || [];
             const setups = data.fibSetups || [];
             const levels = data.levels || [];
 
-            // Randomize slight realistic backtest stats based on ticker for visual completeness
-            const seed = ticker.charCodeAt(0) || 75;
-            const retPct = (18 + (seed % 25)).toFixed(1);
-            const winRate = (58 + (seed % 18)).toFixed(1);
-            const trades = 24 + (seed % 20);
-            const pf = (1.8 + (seed % 10) * 0.1).toFixed(2);
-            const sharpe = (1.4 + (seed % 8) * 0.1).toFixed(2);
-            const dd = -(6 + (seed % 8)).toFixed(1);
+            // 1. Provenance Banner
+            document.getElementById('provenance-banner').classList.remove('hidden');
+            document.getElementById('provenance-source').textContent = data.datasource || 'MySQL Database';
+            document.getElementById('provenance-details').textContent = data.db_candles_loaded
+                ? `${data.db_candles_loaded.toLocaleString()} candles queried from MySQL \`candles\` table`
+                : 'Queried via external market API';
+            document.getElementById('provenance-candles-count').textContent = (data.total_candles || trades.length || 0).toLocaleString();
+            document.getElementById('provenance-dates').textContent = `${data.start_date || '—'} → ${data.end_date || '—'}`;
 
-            document.getElementById('metric-return').textContent = `+${retPct}%`;
-            document.getElementById('metric-winrate').textContent = `${winRate}%`;
-            document.getElementById('metric-trades-count').textContent = `${trades} Closed Trades`;
-            document.getElementById('metric-profit-factor').textContent = pf;
-            document.getElementById('metric-sharpe').textContent = sharpe;
-            document.getElementById('metric-drawdown').textContent = `${dd}%`;
+            // 2. Metrics Cards
+            const ret = metrics.total_return_pct !== undefined ? metrics.total_return_pct : 0.0;
+            const retEl = document.getElementById('metric-return');
+            retEl.textContent = `${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%`;
+            retEl.className = `text-2xl font-bold font-mono ${ret >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
 
-            const capital = parseInt(document.getElementById('capital-select').value);
-            const endCap = Math.round(capital * (1 + parseFloat(retPct)/100));
-            document.getElementById('metric-capital').textContent = `$${endCap.toLocaleString()}`;
+            document.getElementById('metric-winrate').textContent = `${(metrics.win_rate_pct || 0).toFixed(1)}%`;
+            document.getElementById('metric-trades-count').textContent = `${metrics.total_trades || trades.length} Closed Trades (${metrics.winning_trades || 0}W / ${metrics.losing_trades || 0}L)`;
 
-            // Render setups table
-            const tbody = document.getElementById('setups-table-body');
-            if (setups.length) {
-                tbody.innerHTML = setups.map(s => {
-                    const isBull = (s.trend || '').toUpperCase() === 'BULLISH' || (s.trend || '').toUpperCase() === 'UP';
-                    const trendColor = isBull ? 'text-accent-green bg-accent-green/10 border-accent-green/30' : 'text-accent-red bg-accent-red/10 border-accent-red/30';
+            document.getElementById('metric-profit-factor').textContent = (metrics.profit_factor || 0).toFixed(2);
+            document.getElementById('metric-sharpe').textContent = (metrics.sharpe_ratio || 0).toFixed(2);
+
+            const dd = metrics.max_drawdown_pct !== undefined ? metrics.max_drawdown_pct : 0.0;
+            document.getElementById('metric-drawdown').textContent = `-${Math.abs(dd).toFixed(1)}%`;
+
+            const endCap = metrics.ending_capital || seedCapital;
+            document.getElementById('metric-capital').textContent = `$${Math.round(endCap).toLocaleString()}`;
+            document.getElementById('metric-capital-seed').textContent = `From $${Math.round(seedCapital).toLocaleString()} seed`;
+
+            // 3. Executed Trades Table
+            document.getElementById('trades-count-badge').textContent = `${trades.length} Executed Trades`;
+            const tradesBody = document.getElementById('trades-table-body');
+            if (trades.length) {
+                tradesBody.innerHTML = trades.map(t => {
+                    const isWin = (t.pnl || 0) >= 0;
+                    const pnlColor = isWin ? 'text-accent-green' : 'text-accent-red';
+                    const sideColor = t.side === 'BUY'
+                        ? 'text-accent-green bg-accent-green/10 border-accent-green/30'
+                        : 'text-accent-red bg-accent-red/10 border-accent-red/30';
+                    const reasonColor = t.exit_reason === 'TP'
+                        ? 'text-accent-green bg-accent-green/10 border-accent-green/30'
+                        : (t.exit_reason === 'SL' ? 'text-accent-red bg-accent-red/10 border-accent-red/30' : 'text-dark-muted bg-dark-bg border-dark-border');
 
                     return `
                         <tr class="hover:bg-dark-hover/40 transition-colors">
-                            <td class="py-2.5 px-3 font-mono font-bold text-white">${s.patternId || 'Fib Setup'}</td>
+                            <td class="py-2.5 px-3 text-white font-bold">${t.trade_id}</td>
                             <td class="py-2.5 px-3">
-                                <span class="px-2 py-0.5 rounded font-mono font-bold text-[11px] border ${trendColor}">${s.trend || 'BULLISH'}</span>
+                                <span class="px-2 py-0.5 rounded font-bold text-[10px] border ${sideColor}">${t.side}</span>
                             </td>
-                            <td class="py-2.5 px-3 font-mono text-dark-muted">${s.resolution || '1D / 4H'}</td>
-                            <td class="py-2.5 px-3 font-mono font-bold text-white">$${s.entry || s.low || '--'}</td>
-                            <td class="py-2.5 px-3 font-mono text-accent-red font-semibold">$${s.sl || '--'}</td>
-                            <td class="py-2.5 px-3 font-mono text-accent-green font-semibold">$${s.tp || '--'}</td>
+                            <td class="py-2.5 px-3 text-dark-muted whitespace-nowrap">${t.entry_date || '—'}</td>
+                            <td class="py-2.5 px-3 text-dark-muted whitespace-nowrap">${t.exit_date || '—'}</td>
+                            <td class="py-2.5 px-3 text-white font-bold">$${fmt(t.entry_price)}</td>
+                            <td class="py-2.5 px-3 text-white font-bold">$${fmt(t.exit_price)}</td>
+                            <td class="py-2.5 px-3 text-dark-muted">${(t.quantity || 0).toLocaleString()}</td>
+                            <td class="py-2.5 px-3 font-bold ${pnlColor}">${isWin ? '+' : ''}$${fmt(t.pnl)}</td>
+                            <td class="py-2.5 px-3 font-bold ${pnlColor}">${isWin ? '+' : ''}${fmt(t.pnl_percent)}%</td>
+                            <td class="py-2.5 px-3">
+                                <span class="px-2 py-0.5 rounded text-[10px] font-bold border ${reasonColor}">${t.exit_reason || 'CLOSE'}</span>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                tradesBody.innerHTML = `
+                    <tr>
+                        <td colspan="10" class="py-8 text-center text-dark-muted font-sans">
+                            No trades executed for ${escHtml(ticker)} under current constraints (no setups met entry threshold).
+                        </td>
+                    </tr>
+                `;
+            }
+
+            // 4. Setups Table
+            document.getElementById('setups-count').textContent = setups.length;
+            const tbody = document.getElementById('setups-table-body');
+            if (setups.length) {
+                tbody.innerHTML = setups.map(s => {
+                    const isBull = (s.trend || '').toLowerCase().includes('up') || (s.trend || '').toUpperCase() === 'BULLISH';
+                    const trendColor = isBull ? 'text-accent-green bg-accent-green/10 border-accent-green/30' : 'text-accent-red bg-accent-red/10 border-accent-red/30';
+                    const trendLabel = isBull ? '▲ UPTREND' : '▼ DOWNTREND';
+
+                    return `
+                        <tr class="hover:bg-dark-hover/40 transition-colors">
+                            <td class="py-2.5 px-3 font-mono font-bold text-white">${escHtml(s.patternId) || 'Fib Setup'}</td>
+                            <td class="py-2.5 px-3">
+                                <span class="px-2 py-0.5 rounded font-mono font-bold text-[10px] border ${trendColor}">${trendLabel}</span>
+                            </td>
+                            <td class="py-2.5 px-3 font-mono text-dark-muted">${escHtml(s.resolution) || '1D / 4H'}</td>
+                            <td class="py-2.5 px-3 font-mono font-bold text-white">$${fmt(s.entry || s.low)}</td>
+                            <td class="py-2.5 px-3 font-mono text-accent-red font-semibold">$${fmt(s.sl)}</td>
+                            <td class="py-2.5 px-3 font-mono text-accent-green font-semibold">$${fmt(s.tp)}</td>
                             <td class="py-2.5 px-3 font-mono text-accent-cyan font-bold">${s.rr ? s.rr + ':1' : '2.5:1'}</td>
-                            <td class="py-2.5 px-3 font-mono text-dark-muted">$${s.low} – $${s.high} (${s.rangePct || 0}%)</td>
+                            <td class="py-2.5 px-3 font-mono text-dark-muted whitespace-nowrap">$${fmt(s.low)} – $${fmt(s.high)} (${s.rangePct || 0}%)</td>
                         </tr>
                     `;
                 }).join('');
             } else {
                 tbody.innerHTML = `
-                    <tr class="hover:bg-dark-hover/40 transition-colors">
-                        <td class="py-2.5 px-3 font-mono font-bold text-white">Institutional Key Level Setup</td>
-                        <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded font-mono font-bold text-[11px] border text-accent-green bg-accent-green/10 border-accent-green/30">BULLISH</span></td>
-                        <td class="py-2.5 px-3 font-mono text-dark-muted">1D / 4H</td>
-                        <td class="py-2.5 px-3 font-mono font-bold text-white">$124.50</td>
-                        <td class="py-2.5 px-3 font-mono text-accent-red font-semibold">$118.20</td>
-                        <td class="py-2.5 px-3 font-mono text-accent-green font-semibold">$142.00</td>
-                        <td class="py-2.5 px-3 font-mono text-accent-cyan font-bold">2.8:1</td>
-                        <td class="py-2.5 px-3 font-mono text-dark-muted">$118.00 – $145.00</td>
+                    <tr>
+                        <td colspan="8" class="py-8 text-center text-dark-muted">No active Fibonacci setups for ${escHtml(ticker)}</td>
                     </tr>
                 `;
             }
 
-            // Render S/R levels
+            // 5. Support / Resistance Zones
+            document.getElementById('sr-count-badge').textContent = `${levels.length} zones`;
             const srList = document.getElementById('sr-levels-list');
             if (levels.length) {
-                srList.innerHTML = levels.slice(0, 6).map(l => {
+                srList.innerHTML = levels.slice(0, 15).map(l => {
                     const isSup = l.type === 'support';
-                    const color = isSup ? 'text-accent-green border-accent-green/30 bg-accent-green/10' : 'text-accent-red border-accent-red/30 bg-accent-red/10';
+                    const color = isSup ? 'sr-support' : 'sr-resistance';
+                    const arrow = isSup ? '▲' : '▼';
+                    const stars = '★'.repeat(Math.min(l.importance, 5));
                     return `
-                        <div class="flex items-center justify-between p-2 rounded-lg bg-dark-bg border border-dark-border">
+                        <div class="flex items-center justify-between p-2 rounded-lg bg-dark-bg/60 border border-dark-border/50 hover:border-dark-border transition-colors">
                             <div class="flex items-center gap-2">
-                                <span class="px-1.5 py-0.2 rounded uppercase text-[10px] font-bold border ${color}">${l.type}</span>
-                                <span class="text-white font-bold">$${l.price}</span>
+                                <span class="px-1.5 py-0.5 rounded uppercase text-[9px] font-bold border ${color}">${arrow} ${l.type}</span>
+                                <span class="text-white font-bold">$${fmt(l.price)}</span>
                             </div>
-                            <span class="text-dark-muted text-[11px]">Touches: <strong>${l.touchCount}</strong> · Importance: <strong>${l.importance}★</strong></span>
+                            <span class="text-dark-muted text-[11px] flex items-center gap-2">
+                                <span>${l.touchCount} touch${l.touchCount !== 1 ? 'es' : ''}</span>
+                                <span class="text-accent-gold text-[10px]">${stars}</span>
+                            </span>
                         </div>
                     `;
                 }).join('');
             } else {
-                srList.innerHTML = `<div class="text-dark-muted p-2">S/R Levels active on chart</div>`;
+                srList.innerHTML = `<div class="text-dark-muted text-center py-4">No S/R zones detected</div>`;
             }
 
-            // Render Fibonacci Grid
-            const fibList = document.getElementById('fib-grid-list');
-            if (setups.length && setups[0].levels) {
-                const f = setups[0].levels;
-                fibList.innerHTML = Object.entries(f).map(([ratio, price]) => `
-                    <div class="flex items-center justify-between p-2 rounded-lg bg-dark-bg border border-dark-border">
-                        <span class="text-accent-cyan font-bold">Fib ${ratio}</span>
-                        <span class="text-white font-bold">$${price}</span>
-                    </div>
+            // 6. Fibonacci Retracement Grid (Tabbed)
+            renderFibGridTabbed(setups);
+        }
+
+        // ── Tabbed Fibonacci Grid ─────────────────────────────────────────────
+        let _activeFibIndex = 0;
+        let _allSetups = [];
+
+        function renderFibGridTabbed(setups) {
+            _allSetups = setups;
+            _activeFibIndex = 0;
+            const tabsEl = document.getElementById('fib-tabs');
+
+            if (setups && setups.length) {
+                tabsEl.innerHTML = setups.map((s, i) => `
+                    <button onclick="selectFibTab(${i})" id="fib-btn-${i}"
+                        class="text-[10px] font-mono px-2 py-0.5 rounded border transition-colors
+                               ${i === 0 ? 'bg-accent-cyan/20 border-accent-cyan/40 text-accent-cyan' : 'bg-dark-bg border-dark-border text-dark-muted hover:text-white'}">
+                        ${escHtml(s.resolution || `${i+1}TF`)}
+                    </button>
                 `).join('');
+                renderFibList(0);
             } else {
-                fibList.innerHTML = `
-                    <div class="flex items-center justify-between p-2 rounded-lg bg-dark-bg border border-dark-border"><span class="text-accent-cyan font-bold">Fib 0.618 (Golden Ratio)</span><span class="text-white font-bold">Key Reversal Level</span></div>
-                    <div class="flex items-center justify-between p-2 rounded-lg bg-dark-bg border border-dark-border"><span class="text-accent-cyan font-bold">Fib 0.500 (Midpoint)</span><span class="text-white font-bold">Institutional Defense</span></div>
-                    <div class="flex items-center justify-between p-2 rounded-lg bg-dark-bg border border-dark-border"><span class="text-accent-cyan font-bold">Fib 0.382 (First Retrace)</span><span class="text-white font-bold">Trend Continuation</span></div>
+                tabsEl.innerHTML = '';
+                document.getElementById('fib-grid-list').innerHTML = `
+                    <div class="text-dark-muted text-center py-4">No Fibonacci levels available</div>
                 `;
             }
         }
 
+        function selectFibTab(index) {
+            _allSetups.forEach((_, i) => {
+                const btn = document.getElementById(`fib-btn-${i}`);
+                if (!btn) return;
+                btn.className = `text-[10px] font-mono px-2 py-0.5 rounded border transition-colors
+                    ${i === index ? 'bg-accent-cyan/20 border-accent-cyan/40 text-accent-cyan' : 'bg-dark-bg border-dark-border text-dark-muted hover:text-white'}`;
+            });
+            _activeFibIndex = index;
+            renderFibList(index);
+        }
+
+        const FIB_METAS = {
+            '0.000': { label: '0.000 (Base Extreme)', cls: 'fib-regular' },
+            '0.236': { label: '0.236 (Shallow Retracement)', cls: 'fib-regular' },
+            '0.382': { label: '0.382 (First Retracement)', cls: 'fib-regular' },
+            '0.500': { label: '0.500 (Midpoint Equilibrium)', cls: 'fib-regular' },
+            '0.618': { label: '0.618 (Golden Ratio 🔑)', cls: 'fib-key' },
+            '0.786': { label: '0.786 (Deep Institutional SL)', cls: 'fib-regular' },
+            '1.000': { label: '1.000 (Full Retracement)', cls: 'fib-regular' },
+        };
+
+        function renderFibList(index) {
+            const fibList = document.getElementById('fib-grid-list');
+            const setup = _allSetups[index];
+            if (!setup || !setup.levels) {
+                fibList.innerHTML = `<div class="text-dark-muted text-center py-4">No levels for selected setup</div>`;
+                return;
+            }
+
+            fibList.innerHTML = Object.entries(setup.levels).map(([ratio, price]) => {
+                const meta = FIB_METAS[ratio] || { label: `Fib ${ratio}`, cls: 'fib-regular' };
+                const isKey = ratio === '0.618';
+                return `
+                    <div class="flex items-center justify-between p-2 rounded-lg border transition-colors
+                                ${isKey ? 'bg-accent-gold/5 border-accent-gold/25' : 'bg-dark-bg/60 border-dark-border/50 hover:border-dark-border'}">
+                        <span class="font-bold ${meta.cls}">${meta.label}</span>
+                        <span class="text-white font-bold">$${fmt(price)}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // ── DB Panel ──────────────────────────────────────────────────────────
+        function renderDBPanel(data) {
+            const el = document.getElementById('db-tables-list');
+            const tables = (data.tables || []).map(t => Object.values(t)[0]);
+            const KEY_TABLES = new Set(['candles', 'signals', 'historical_signals', 'orders', 'available_tickers', 'candle_coverage']);
+
+            document.getElementById('db-summary-badge').textContent = `${tables.length} tables · MySQL 8.0`;
+
+            el.innerHTML = `
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5 mb-3">
+                    ${tables.map(t => {
+                        const isKey = KEY_TABLES.has(t);
+                        return `<span class="px-2 py-1 rounded text-[10px] font-mono border transition-colors
+                            ${isKey ? 'text-accent-cyan border-accent-cyan/30 bg-accent-cyan/5 font-bold' : 'text-dark-muted border-dark-border/50 bg-dark-bg/40'}
+                            truncate" title="${escHtml(t)}">${escHtml(t)}</span>`;
+                    }).join('')}
+                </div>
+                <div class="text-[10px] text-dark-muted font-mono flex flex-wrap gap-2.5">
+                    <span>Total tables: <strong class="text-white">${tables.length}</strong></span>
+                    <span class="text-accent-cyan font-bold">● Highlighted = Key Candlestick/Signal Tables</span>
+                    ${data.sample_table ? `<span>· Active: <strong class="text-white">${escHtml(data.sample_table)}</strong></span>` : ''}
+                </div>
+            `;
+        }
+
+        // ── Formatters ────────────────────────────────────────────────────────
+        function fmt(n) {
+            if (n == null || n === '' || isNaN(n)) return '—';
+            return parseFloat(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+
+        function escHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function initEcosystemLinks() {
+            document.querySelectorAll('.ecosystem-link[data-port]').forEach(el => {
+                const port = el.getAttribute('data-port');
+                const path = el.getAttribute('data-path') || '/';
+                el.href = `${window.location.protocol}//${window.location.hostname}:${port}${path}`;
+            });
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
-            runStrategy();
+            initEcosystemLinks();
+            updateStrategyDesc();
+            checkDatabase();
+            // Automatically run backtest on page load
+            runStrategyBacktest();
         });
     </script>
 </body>

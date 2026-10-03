@@ -1,17 +1,25 @@
 import pandas_ta as ta
-from lumibot.strategies.strategy import Strategy
+from strategies.strat_baseplate import StrategyBaseplate
 
-class HCRBreakoutLongSwing(Strategy):
+
+class HCRBreakoutLongSwing(StrategyBaseplate):
     parameters = {
+        **StrategyBaseplate.parameters,
         "Ticker": "NVDA",
         "ConsolidationDays": 15,
         "MaxRangePct": 0.05,  # 5% max variance over 15 days for a swing consolidation
         "RiskPct": 0.02,
         "ATR_Multiplier": 1.5,
+        "TradingStyle": "swing_trading",
+        "TrailingStop": True,
     }
 
     def initialize(self):
+        super().initialize()
         self.sleeptime = "1D"
+        self.stop_price = None
+        self.target_price = None
+        self.current_trailing_stop = None
 
     def on_trading_iteration(self):
         symbol = self.parameters["Ticker"]
@@ -39,15 +47,35 @@ class HCRBreakoutLongSwing(Strategy):
             if range_pct <= self.parameters["MaxRangePct"]:
                 # Breakout entry: current price clears the consolidation high by a small percentage
                 if current_price > (highest * 1.002):
-                    qty = (self.get_portfolio_value() * self.parameters["RiskPct"]) / max(1, (atr * self.parameters["ATR_Multiplier"]))
-                    order = self.create_order(symbol, int(qty), "buy")
-                    self.submit_order(order)
-                    self.stop_price = current_price - (atr * self.parameters["ATR_Multiplier"])
+                    # Custom calculation
+                    custom_sl = current_price - (atr * self.parameters["ATR_Multiplier"])
+                    
+                    # Pass through ATR optimization function BEFORE order submission
+                    risk_levels = self.optimize_sl_tp(
+                        entry_price=current_price,
+                        stop_loss=custom_sl,
+                        take_profit=None,
+                        side="buy",
+                        atr=atr,
+                        trading_style=self.parameters.get("TradingStyle", "swing_trading"),
+                        sl_multiplier=self.parameters["ATR_Multiplier"],
+                        trailing_stop=True,
+                    )
+                    self.stop_price = risk_levels.stop_loss
+                    self.current_trailing_stop = self.stop_price
+                    
+                    risk_dist = max(0.01, current_price - self.stop_price)
+                    qty = (self.get_portfolio_value() * self.parameters["RiskPct"]) / risk_dist
+                    if qty >= 1:
+                        order = self.create_order(symbol, int(qty), "buy")
+                        self.submit_order(order)
         else:
             # Trailing stop using ATR
-            new_stop = current_price - (atr * self.parameters["ATR_Multiplier"])
+            new_stop = self.get_trailing_stop(current_price, side="buy", sl_multiplier=self.parameters["ATR_Multiplier"])
             if new_stop > getattr(self, "stop_price", 0):
                 self.stop_price = new_stop
                 
-            if current_price <= self.stop_price:
+            if self.stop_price and current_price <= self.stop_price:
                 self.sell_all()
+                self.stop_price = None
+                self.current_trailing_stop = None

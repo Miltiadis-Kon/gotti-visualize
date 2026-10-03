@@ -32,7 +32,6 @@ import pandas_ta as ta
 import pandas as pd
 from datetime import datetime, timedelta
 from lumibot.backtesting import YahooDataBacktesting
-from lumibot.strategies import Strategy
 from lumibot.brokers import Alpaca
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
@@ -60,12 +59,16 @@ ALPACA_CONFIG = {
 
 
 
-class OpeningGap(Strategy, PlottableStrategyMixin):
+from strategies.strat_baseplate import StrategyBaseplate
+
+
+class OpeningGap(StrategyBaseplate):
     
     parameters = {
+        **StrategyBaseplate.parameters,
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
         "Plot": True, # True if you want to plot the trades, False if you don't want to plot the trades
-
+        "TradingStyle": "day_trading",
     }
     
     
@@ -73,8 +76,9 @@ class OpeningGap(Strategy, PlottableStrategyMixin):
     ##### CORE FUNCTIONS #####
         
     def initialize(self):
+        super().initialize()
         self.sleeptime = "5M" # Execute strategy every 5 minutes.
-        self.will_plot = self.parameters["Plot"]
+        self.will_plot = self.parameters.get("Plot", True)
         self.risk_percent = 0.02 # 2% risk per trade
     
     def before_market_opens(self):
@@ -118,11 +122,22 @@ class OpeningGap(Strategy, PlottableStrategyMixin):
         '''
         # If the order is filled, we can print the order details
     #    print(f"Order filled: {order}.Status: {order.status} Date: {self.get_datetime()} . Remaining cash: {self.cash}")
-        if  order.side == "buy":
+        if order.side == "sell":
             return
         
-        take_profit = self.get_take_profit(price)
-        stop_loss = self.get_stop_loss(price)
+        # 1. Custom strategy calculation
+        custom_tp = self.get_take_profit(price)
+        custom_sl = self.get_stop_loss(price)
+        
+        # 2. Pass through ATR optimization function on top of custom ones
+        risk_levels = self.optimize_sl_tp(
+            entry_price=price,
+            stop_loss=custom_sl,
+            take_profit=custom_tp,
+            side="buy"
+        )
+        take_profit = risk_levels.take_profit
+        stop_loss = risk_levels.stop_loss
         
         # Update order's take profit and stop loss prices
         order2 = self.create_order(asset = self.parameters["Ticker"],
@@ -178,10 +193,12 @@ class OpeningGap(Strategy, PlottableStrategyMixin):
     def on_strategy_end(self):
         if getattr(self, "will_plot", False) and getattr(self, "is_backtesting", False):
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            ticker = self.parameters.get('Ticker', 'chart')
+            ticker_symbol = ticker.symbol if hasattr(ticker, 'symbol') else str(ticker)
             output_path = os.path.join(
                 repo_root,
                 'logs', 'charts',
-                f"{self.parameters.get('Ticker', 'chart')}_chart.html"
+                f"{ticker_symbol}_chart.html"
             )
             self.save_plot_html(output_path)
         return super().on_strategy_end()

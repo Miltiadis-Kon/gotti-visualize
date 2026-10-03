@@ -35,11 +35,11 @@ from key_levels import (
     RESOLUTION_IMPORTANCE,
     DEFAULT_PRICE_THRESHOLD
 )
+from strategies.strat_baseplate import StrategyBaseplate
 from trade_tracker import TradeTracker
-from plot_mixin import PlottableStrategyMixin
 
 
-class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
+class BaseKeyLevelsStrategy(StrategyBaseplate):
     """
     Base class for key levels trading strategies.
     
@@ -60,13 +60,14 @@ class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
     
     # Default parameters - child classes can override
     parameters = {
+        **StrategyBaseplate.parameters,
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
         "RISK_PERCENT": 0.02,      # Risk 2% of portfolio per trade
         "MIN_IMPORTANCE": 1,       # Minimum level importance to consider
         "TIMEFRAMES": ['1d', '4h', '1h', '15m'],  # Timeframes to analyze
         "RECALC_FREQUENCY": "daily",  # How often to recalculate: 'daily', 'weekly', 'once'
         "ENTRY_THRESHOLD": 0.05,   # 5% tolerance for entry (price within 5% of level)
-        "EXIT_THRESHOLD": 0.1,    # 2% tolerance for TP/SL exits
+        "EXIT_THRESHOLD": 0.02,    # 2% tolerance for TP/SL exits
     }
     
     # Class-level cache for key levels (persists across backtesting iterations)
@@ -179,16 +180,29 @@ class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
         """
         Handle filled orders - tracks trades automatically.
         """
-        ticker = self.parameters["Ticker"].symbol
+        ticker = self.parameters["Ticker"].symbol if hasattr(self.parameters["Ticker"], "symbol") else str(self.parameters["Ticker"])
         
-        if order.side == "buy":
-            self.log_message(f"[{self.get_strategy_name()}] BUY filled: {quantity} @ ${price:.2f}")
-            if self.entry_support and self.target_resistance:
-                self.log_message(f"  Support: ${self.entry_support:.2f}, Target: ${self.target_resistance:.2f}")
+        is_entry = False
+        if order.side in ("buy", "buy_to_cover"):
+            if position and position.quantity > 0:
+                is_entry = True
+                self.log_message(f"[{self.get_strategy_name()}] BUY entry filled: {quantity} @ ${price:.2f}")
+                if self.entry_support and self.target_resistance:
+                    self.log_message(f"  Support: ${self.entry_support:.2f}, Target: ${self.target_resistance:.2f}")
+            else:
+                is_entry = False
+                self.log_message(f"[{self.get_strategy_name()}] SHORT exit filled: {quantity} @ ${price:.2f}")
+        elif order.side in ("sell", "sell_short"):
+            if position and position.quantity < 0:
+                is_entry = True
+                self.log_message(f"[{self.get_strategy_name()}] SHORT entry filled: {quantity} @ ${price:.2f}")
+                if self.entry_support and self.target_resistance:
+                    self.log_message(f"  Resistance: ${self.entry_support:.2f}, Target: ${self.target_resistance:.2f}")
+            else:
+                is_entry = False
+                self.log_message(f"[{self.get_strategy_name()}] LONG exit filled: {quantity} @ ${price:.2f}")
         
-        elif order.side == "sell":
-            self.log_message(f"[{self.get_strategy_name()}] SELL filled: {quantity} @ ${price:.2f}")
-            
+        if not is_entry:
             # Close trade in tracker
             if self.current_trade_id:
                 exit_reason = self._determine_exit_reason(price)
@@ -209,6 +223,7 @@ class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
             # Reset trade tracking
             self.entry_support = None
             self.target_resistance = None
+            self.current_trailing_stop = None
     
     def after_market_closes(self):
         """
@@ -261,9 +276,9 @@ class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
             if self.current_trade_id:
                 self.trade_tracker.close_trade(
                     trade_id=self.current_trade_id,
-                    exit_date=self.get_datetime(),
+                    date=self.get_datetime(),
                     exit_price=current_price,
-                    reason="END_SIM"
+                    exit_reason="END_SIM"
                 )
             
             # Close actual position
@@ -370,10 +385,22 @@ class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
         # Extract signal details
         trade_type = signal.get('trade_type', 'BUY')  # Default to BUY for backwards compatibility
         entry_price = signal.get('entry_price', current_price)
-        take_profit = signal['take_profit']
-        stop_loss = signal['stop_loss']
+        custom_tp = signal['take_profit']
+        custom_sl = signal['stop_loss']
         support_level = signal['support_level']
         resistance_level = signal['resistance_level']
+        
+        # Pass custom SL/TP through ATR optimization framework
+        side = "buy" if trade_type == "BUY" else "sell"
+        risk_levels = self.optimize_sl_tp(
+            entry_price=entry_price,
+            stop_loss=custom_sl,
+            take_profit=custom_tp,
+            side=side,
+            trading_style=self.parameters.get("TradingStyle", "swing_trading"),
+        )
+        take_profit = risk_levels.take_profit
+        stop_loss = risk_levels.stop_loss
         
         # Check if we already entered at this level
         entry_level = support_level if trade_type == 'BUY' else resistance_level
@@ -490,15 +517,14 @@ class BaseKeyLevelsStrategy(Strategy, PlottableStrategyMixin):
         return "MANUAL"
     
     def get_position_sizing(self, entry_price: float, stop_loss: float) -> int:
-        # 1. qty = risk amount / (entry + abs(entry - stop loss))
         risk_budget = self.get_portfolio_value() * self.risk_percent 
         risk_per_share = abs(entry_price - stop_loss)
-        total_cost_per_share = entry_price + risk_per_share
-        if total_cost_per_share <= 0:
+        if risk_per_share <= 0:
             return 0
-        quantity = floor(risk_budget / total_cost_per_share)
-        print(f"Budget: {risk_budget} | Cost/Share: {total_cost_per_share} | Qty: {quantity}")
-        return quantity
+        quantity = floor(risk_budget / risk_per_share)
+        max_affordable = floor((self.get_portfolio_value() * 0.95) / max(0.01, entry_price))
+        quantity = min(quantity, max_affordable)
+        return max(0, quantity)
 
     def _should_reload_levels(self, current_date) -> bool:
         """Check if we need to reload key levels."""

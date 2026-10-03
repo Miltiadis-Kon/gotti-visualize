@@ -36,9 +36,13 @@ ALPACA_CONFIG = {
     "PAPER": True,  # Set to True for paper trading, False for live trading
 }
 
-class ShortRSIThrust(Strategy, PlottableStrategyMixin):
+from strategies.strat_baseplate import StrategyBaseplate
+
+
+class ShortRSIThrust(StrategyBaseplate):
     
     parameters = {
+        **StrategyBaseplate.parameters,
         "AvgDailyVolume": 25000000,
         "SmaLength":50,
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
@@ -49,7 +53,7 @@ class ShortRSIThrust(Strategy, PlottableStrategyMixin):
         "MaxSizePercent" : 0.1, # 10 percent size
         "MaxPositions" : 10,
         "ATRPeriod" : 10,
-        
+        "TradingStyle": "swing_trading",
     }
     
     def check_if_tradeable(self):
@@ -89,41 +93,41 @@ class ShortRSIThrust(Strategy, PlottableStrategyMixin):
         return True
     
     def before_market_opens(self):
-        self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"],self.parameters["ATRPeriod"]+1,"day").df
+        self.ticker_bars = self.get_historical_prices(self.parameters["Ticker"], 50, "day").df
         self.is_tradeable = self.check_if_tradeable()
         self.is_setup_met = self.setup()
-        # Check positions
-            # Place stop loss 
-        
         return super().before_market_opens()
    
     def initialize(self):
+        super().initialize()
         # Strategy parameters
         self.sleeptime = "1D" # Execute strategy every day once
-        self.risk_percent = self.parameters["RiskPercent"] # 2 percent risk
-        self.max_size_percent = self.parameters["MaxSizePercent"] # 10 percent size
-        self.max_positions = self.parameters["MaxPositions"]
+        self.risk_percent = self.parameters.get("RiskPercent", 0.02) # 2 percent risk
+        self.max_size_percent = self.parameters.get("MaxSizePercent", 0.1) # 10 percent size
+        self.max_positions = self.parameters.get("MaxPositions", 10)
         
         # Trading parameters
         self.entry_percent = 0.04  # 4% above previous close
         self.profit_target = 0.04  # 4% profit target
-        self.atr_period = self.parameters["ATRPeriod"]  # Period for ATR calculation
+        self.atr_period = self.parameters.get("ATRPeriod", 10)  # Period for ATR calculation
         self.atr_multiplier = 3  # Multiplier for stop loss
         
         # Track open positions
         self.positions_data = {}  # Dictionary to track position entry dates and prices
         
-        #TODO: fix this
     def position_sizing(self): 
         """Calculate position size based on risk parameters"""
         if len(self.positions_data) >= self.max_positions:
             return 0     
-        return int((self.cash / self.ticker_bars["close"].iloc[-1]) * self.risk_percent)
+        return int((self.get_portfolio_value() / self.ticker_bars["close"].iloc[-1]) * self.risk_percent)
 
-    def get_atr(self):
-        """Calculate ATR for the last 10 days"""
-        bars = self.ticker_bars
-        return ta.atr(bars['high'], bars['low'], bars['close'], length=self.atr_period).iloc[-1]
+    def get_atr(self, length=None, df=None):
+        """Calculate ATR for the strategy"""
+        resolved_length = length or getattr(self, "atr_period", 10)
+        bars = df if df is not None else getattr(self, "ticker_bars", None)
+        if bars is not None and len(bars) >= resolved_length:
+            return ta.atr(bars['high'], bars['low'], bars['close'], length=resolved_length).iloc[-1]
+        return super().get_atr(length=resolved_length, df=df)
 
 
     def get_plot_spec(self):
@@ -190,10 +194,26 @@ class ShortRSIThrust(Strategy, PlottableStrategyMixin):
                 # Place new orders
                 
                 # calculate entry price
-                entry_price = self.ticker_bars["close"].iloc[-1] * (1 + self.entry_percent)
-                # calculate stop loss and take profit
-                tp = entry_price * (1 + self.profit_target) # TODO: 4% profit target
-                sl = entry_price - self.get_atr() * self.atr_multiplier #TODO: 3 times ATR of the last ten days above the execution price
+                entry_price = float(self.ticker_bars["close"].iloc[-1] * (1 + self.entry_percent))
+                # calculate custom stop loss and take profit
+                custom_tp = entry_price * (1 - abs(self.profit_target))  # 4% profit target below entry for short
+                custom_sl = entry_price + (self.get_atr() * self.atr_multiplier)  # 3x ATR above entry for short
+                
+                # Pass through ATR optimization function
+                risk_levels = self.optimize_sl_tp(
+                    entry_price=entry_price,
+                    stop_loss=custom_sl,
+                    take_profit=custom_tp,
+                    side="sell",
+                    atr=self.get_atr(),
+                    trading_style=self.parameters.get("TradingStyle", "swing_trading"),
+                    sl_multiplier=self.atr_multiplier,
+                    risk_reward_ratio=self.parameters.get("RiskRewardRatio", 2),
+                    trailing_stop=self.parameters.get("TrailStopLoss", False),
+                )
+                tp = risk_levels.take_profit
+                sl = risk_levels.stop_loss
+                
                 # calculate position size
                 position_size = self.position_sizing() 
                 
@@ -208,7 +228,7 @@ class ShortRSIThrust(Strategy, PlottableStrategyMixin):
                     take_profit_price=tp,
                     position_filled=True,
                     type="bracket",
-                    time_in_force="gtc",
+                    time_in_force="gtd",
                     good_till_date=self.get_datetime() + timedelta(days=2),
                 )
                 
@@ -216,21 +236,27 @@ class ShortRSIThrust(Strategy, PlottableStrategyMixin):
                 order = self.submit_order(order)
                 pass  # Trade visualization is handled via get_plot_spec() / render_plot()
     
-    def on_filled_order(self, position, order, price, quantity,multiplier) :
-        """Update position data after order is filled"""
-        if order.asset == self.parameters["Ticker"]: # Only update data for the traded asset    
-            # Print order details
+    def on_filled_order(self, position, order, price, quantity, multiplier):
+        """Update position data after order is filled without double-stacking child bracket orders"""
+        ticker = self.parameters.get("Ticker")
+        if order.asset == ticker:
             print(f"Order filled: {order.side} {quantity} {order.asset} at {price} on {self.get_datetime()}")  
-            self.positions_data[order.identifier] = {"entry_date": self.get_datetime()} # Update entry date     
-        return super().on_filled_order(position, order, price, quantity, multiplier)
+            if order.side in ("sell", "sell_short") and position and position.quantity < 0:
+                self.positions_data[order.identifier] = {"entry_date": self.get_datetime()}
+            elif order.side in ("buy", "buy_to_cover"):
+                # Exit fill — clear tracking and reset trailing stop
+                self.positions_data.clear()
+                self.current_trailing_stop = None
 
     def on_strategy_end(self):
-        if getattr(self, "is_backtesting", False):
+        if getattr(self, "is_backtesting", False) and getattr(self, "will_plot", False):
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            ticker = self.parameters.get('Ticker', 'chart')
+            ticker_symbol = ticker.symbol if hasattr(ticker, 'symbol') else str(ticker)
             output_path = os.path.join(
                 repo_root,
                 'logs', 'charts',
-                f"{self.parameters.get('Ticker', 'chart')}_chart.html"
+                f"{ticker_symbol}_chart.html"
             )
             self.save_plot_html(output_path)
         return super().on_strategy_end()

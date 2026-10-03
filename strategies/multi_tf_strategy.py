@@ -106,6 +106,7 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
         # so base class _handle_entry() doesn't bail early
         self.support_levels = pd.DataFrame()
         self.resistance_levels = pd.DataFrame()
+        self.active_trade_map = {}
 
         self.log_message(
             f"[{self.get_strategy_name()}] Initialized (FIB+SR, LONG+SHORT) - "
@@ -647,6 +648,22 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
         if self._is_level_already_entered(entry_level, trade_type):
             return
             
+        # Optimize custom SL/TP through ATR volatility framework
+        side = "buy" if trade_type == 'BUY' else "sell"
+        ticker = self.parameters.get("Ticker", "SPY")
+        atr = self.get_atr(length=14)
+        risk_levels = self.optimize_sl_tp(
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            side=side,
+            atr=atr,
+            trading_style=self.parameters.get("TradingStyle", "day_trading"),
+            sl_multiplier=self.parameters.get("ATR_Multiplier", 1.5),
+        )
+        stop_loss = risk_levels.stop_loss
+        take_profit = risk_levels.take_profit
+
         quantity = signal.get('quantity')
         if quantity is None:
             quantity = self.get_position_sizing(entry_price, stop_loss)
@@ -670,15 +687,14 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
         )
         self.current_trade_id = trade_id
         
-        side = "buy" if trade_type == "BUY" else "sell"
+        side = "buy" if trade_type == "BUY" else "sell_short"
         order = self.create_order(
             asset=self.parameters["Ticker"],
             quantity=quantity,
             side=side,
             limit_price=entry_price,
-            secondary_limit_price=take_profit,
-            secondary_stop_price=stop_loss,
-            order_class="bracket",
+            take_profit_price=take_profit,
+            stop_loss_price=stop_loss,
         )
         self.submit_order(order)
         
@@ -733,7 +749,7 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
             self.log_message(msg)
 
         elif is_exit:
-            exit_reason = self._determine_exit_reason(price)
+            exit_reason = self._determine_exit_reason(price, mapped_trade_id)
             closed_trade = self.trade_tracker.close_trade(
                 trade_id=mapped_trade_id,
                 date=self.get_datetime(),
@@ -741,8 +757,8 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
                 exit_reason=exit_reason
             )
             
-            pnl_str = f"+${closed_trade.pnl:.2f}" if closed_trade.pnl >= 0 else f"-${abs(closed_trade.pnl):.2f}"
-            icon = "[OK]" if closed_trade.pnl > 0 else "[FAIL]"
+            pnl_str = f"+${closed_trade.pnl:.2f}" if closed_trade and closed_trade.pnl >= 0 else (f"-${abs(closed_trade.pnl):.2f}" if closed_trade else "$0.00")
+            icon = "[OK]" if (closed_trade and closed_trade.pnl > 0) else "[FAIL]"
             
             msg = (
                 f"\n{'='*60}\n"
@@ -762,9 +778,10 @@ class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
             self.entry_support = None
             self.target_resistance = None
 
-    def _determine_exit_reason(self, exit_price: float) -> str:
+    def _determine_exit_reason(self, exit_price: float, trade_id: int = None) -> str:
         """Determine exit reason accurately for both LONG and SHORT."""
-        trade = self.trade_tracker.get_trade(self.current_trade_id)
+        target_id = trade_id or self.current_trade_id
+        trade = self.trade_tracker.get_trade(target_id)
         if trade:
             if trade.trade_type == "BUY":
                 if exit_price >= trade.take_profit * 0.99:

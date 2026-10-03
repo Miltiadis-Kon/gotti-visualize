@@ -451,6 +451,10 @@
   </div>
 
   <div id="headerRight">
+    <a href="/strategies" style="color:var(--tx-1); text-decoration:none; font-size:11px; font-weight:600; padding:4px 8px; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--bg-2);">Strategy Hub</a>
+    <a href="#" data-port="10000" data-path="/evaluate" class="ecosystem-link" style="color:#818cf8; text-decoration:none; font-size:11px; font-weight:600; padding:4px 8px; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--bg-2);">Evaluator</a>
+    <a href="#" data-port="8080" data-path="/" class="ecosystem-link" style="color:var(--tx-1); text-decoration:none; font-size:11px; font-weight:600; padding:4px 8px; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--bg-2);">Alchemist</a>
+    <a href="#" data-port="3000" data-path="/" class="ecosystem-link" style="color:#ffffff; text-decoration:none; font-size:11px; font-weight:600; padding:4px 8px; border-radius:var(--r-sm); background:#4f46e5;">Client App</a>
     <div id="statusBadge">
       <span class="status-dot"></span>
       <span id="statusText">Ready</span>
@@ -566,7 +570,7 @@
 /* ═══════════════════════════════════════════════════════════
    CONFIG
 ═══════════════════════════════════════════════════════════ */
-const API = 'http://localhost:8000';
+const API = window.location.origin;
 const LINE_STYLE = LightweightCharts.LineStyle;
 
 /* ═══════════════════════════════════════════════════════════
@@ -1158,6 +1162,15 @@ function emptyState(msg) {
 document.getElementById('tickerInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') loadChart();
 });
+
+function initEcosystemLinks() {
+  document.querySelectorAll('.ecosystem-link[data-port]').forEach(el => {
+    const port = el.getAttribute('data-port');
+    const path = el.getAttribute('data-path') || '/';
+    el.href = `${window.location.protocol}//${window.location.hostname}:${port}${path}`;
+  });
+}
+initEcosystemLinks();
 
 // Init chart engine
 initChart();

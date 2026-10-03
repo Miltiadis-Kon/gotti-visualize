@@ -116,8 +116,8 @@ class TradeTracker:
         quantity: int,
         take_profit: float,
         stop_loss: float,
-        support_level: float,
-        resistance_level: float,
+        support_level: Optional[float] = None,
+        resistance_level: Optional[float] = None,
         trade_type: str = "BUY"
     ) -> int:
         """
@@ -164,6 +164,8 @@ class TradeTracker:
         trade = self.get_trade(trade_id)
         if trade is None:
             return None
+        if trade.date_completed is not None:
+            return trade
         
         trade.date_completed = date
         trade.exit_price = exit_price
@@ -278,7 +280,7 @@ class TradeTracker:
         running_pnl = 0.0
         
         for trade in self.trades:
-            if trade.pnl:
+            if trade.pnl is not None:
                 running_pnl += trade.pnl
             
             records.append({
@@ -297,7 +299,7 @@ class TradeTracker:
                 'exit_reason': trade.exit_reason,
                 'pnl': trade.pnl,
                 'pnl_percent': trade.pnl_percent,
-                'total_pnl': running_pnl if trade.pnl else None,
+                'total_pnl': running_pnl if trade.pnl is not None else None,
                 'duration_hours': trade.duration
             })
         

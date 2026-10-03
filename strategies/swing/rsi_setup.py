@@ -1,18 +1,26 @@
 import pandas_ta as ta
-from lumibot.strategies.strategy import Strategy
+from strategies.strat_baseplate import StrategyBaseplate
 
-class RSISetupSwing(Strategy):
+
+class RSISetupSwing(StrategyBaseplate):
     parameters = {
+        **StrategyBaseplate.parameters,
         "Ticker": "NVDA",
         "RsiLength": 14,
         "RsiOversold": 30,
         "RsiOverbought": 70,
         "RiskPct": 0.02,
         "ATR_Multiplier": 2.0,
+        "TradingStyle": "swing_trading",
+        "TrailingStop": True,
     }
 
     def initialize(self):
+        super().initialize()
         self.sleeptime = "1D"
+        self.stop_price = None
+        self.target_price = None
+        self.current_trailing_stop = None
 
     def on_trading_iteration(self):
         symbol = self.parameters["Ticker"]
@@ -38,15 +46,35 @@ class RSISetupSwing(Strategy):
         if pos is None:
             # Cross above oversold threshold
             if prev_rsi < self.parameters["RsiOversold"] and current_rsi >= self.parameters["RsiOversold"]:
-                qty = (self.get_portfolio_value() * self.parameters["RiskPct"]) / max(1, (atr * self.parameters["ATR_Multiplier"]))
-                order = self.create_order(symbol, int(qty), "buy")
-                self.submit_order(order)
-                self.stop_price = current_price - (atr * self.parameters["ATR_Multiplier"])
+                # Custom calculation
+                custom_sl = current_price - (atr * self.parameters["ATR_Multiplier"])
+                
+                # Pass through ATR optimization function BEFORE order submission
+                risk_levels = self.optimize_sl_tp(
+                    entry_price=current_price,
+                    stop_loss=custom_sl,
+                    take_profit=None,
+                    side="buy",
+                    atr=atr,
+                    trading_style=self.parameters.get("TradingStyle", "swing_trading"),
+                    sl_multiplier=self.parameters["ATR_Multiplier"],
+                    trailing_stop=True,
+                )
+                self.stop_price = risk_levels.stop_loss
+                self.current_trailing_stop = self.stop_price
+                
+                risk_dist = max(0.01, current_price - self.stop_price)
+                qty = (self.get_portfolio_value() * self.parameters["RiskPct"]) / risk_dist
+                if qty >= 1:
+                    order = self.create_order(symbol, int(qty), "buy")
+                    self.submit_order(order)
         else:
             # Trailing stop or RSI overbought target
-            new_stop = current_price - (atr * self.parameters["ATR_Multiplier"])
+            new_stop = self.get_trailing_stop(current_price, side="buy", sl_multiplier=self.parameters["ATR_Multiplier"])
             if new_stop > getattr(self, "stop_price", 0):
                 self.stop_price = new_stop
                 
-            if current_price <= self.stop_price or current_rsi >= self.parameters["RsiOverbought"]:
+            if (self.stop_price and current_price <= self.stop_price) or current_rsi >= self.parameters["RsiOverbought"]:
                 self.sell_all()
+                self.stop_price = None
+                self.current_trailing_stop = None

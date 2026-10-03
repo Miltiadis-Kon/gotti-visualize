@@ -45,15 +45,18 @@ from trade_tracker import TradeTracker
 
 # Database configuration
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 3306,
-    "database": "gotti",
-    "user": "root",
-    "password": "1234"
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "database": os.getenv("DB_NAME", "gotti"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "1234"),
 }
 
 
-class SignalKeyLevelsStrategy(Strategy):
+from strategies.strat_baseplate import StrategyBaseplate
+
+
+class SignalKeyLevelsStrategy(StrategyBaseplate):
     """
     Signal-based key levels trading strategy with multi-ticker support.
     
@@ -83,6 +86,7 @@ class SignalKeyLevelsStrategy(Strategy):
     """
     
     parameters = {
+        **StrategyBaseplate.parameters,
         # Can be a single Asset or list of Assets or list of strings
         "Tickers": [],  # Empty = use only dynamic tickers from DB
         "DYNAMIC_TICKERS": True,         # Auto-trade tickers from database signals
@@ -96,13 +100,15 @@ class SignalKeyLevelsStrategy(Strategy):
         "SL_BUFFER": 0.005,              # 0.5% buffer for stop loss
     }
     
-    # Class-level cache for key levels
+    # Class-level cache fallback
     _cached_levels = {}
     _last_trade_tracker = None
     
     def initialize(self):
         """Initialize the strategy."""
+        super().initialize()
         self.sleeptime = "5M"  # Execute every 5 minutes
+        self._cached_levels = {}
         
         # Load parameters
         self.risk_percent = self.parameters.get("RISK_PERCENT", 0.02)
@@ -464,8 +470,21 @@ class SignalKeyLevelsStrategy(Strategy):
         """Execute a trade based on entry signal."""
         trade_type = entry['trade_type']
         entry_price = entry['entry_price']
-        take_profit = entry['take_profit']
-        stop_loss = entry['stop_loss']
+        custom_take_profit = entry['take_profit']
+        custom_stop_loss = entry['stop_loss']
+        
+        # Pass custom SL/TP through ATR optimization framework
+        side = "buy" if trade_type == "BUY" else "sell"
+        risk_levels = self.optimize_sl_tp(
+            entry_price=entry_price,
+            stop_loss=custom_stop_loss,
+            take_profit=custom_take_profit,
+            side=side,
+            trading_style="swing_trading",
+            risk_reward_ratio=self.risk_reward,
+        )
+        take_profit = risk_levels.take_profit
+        stop_loss = risk_levels.stop_loss
         
         # Calculate position size
         quantity = self._get_position_sizing(entry_price, stop_loss, trade_type)
@@ -488,7 +507,7 @@ class SignalKeyLevelsStrategy(Strategy):
         self._current_trade_ids[ticker] = trade_id
         
         # Create and submit order
-        side = "buy" if trade_type == "BUY" else "sell"
+        side = "buy" if trade_type == "BUY" else "sell_short"
         
         self.log_message(
             f"[SignalKeyLevels] {ticker} {trade_type}: {quantity} @ ${entry_price:.2f}, "
@@ -523,28 +542,42 @@ class SignalKeyLevelsStrategy(Strategy):
         return max(0, quantity)
     
     def on_filled_order(self, position, order, price, quantity, multiplier):
-        """Handle filled orders."""
+        """Handle filled orders with correct short entry vs exit classification."""
         ticker = order.asset.symbol
         
-        if order.side == "buy":
-            self.log_message(f"[SignalKeyLevels] {ticker} BUY filled: {quantity} @ ${price:.2f}")
-        elif order.side == "sell":
-            self.log_message(f"[SignalKeyLevels] {ticker} SELL filled: {quantity} @ ${price:.2f}")
+        is_entry = False
+        if order.side in ("buy", "buy_to_cover"):
+            if position and position.quantity > 0:
+                is_entry = True
+                self.log_message(f"[SignalKeyLevels] {ticker} BUY entry filled: {quantity} @ ${price:.2f}")
+            else:
+                is_entry = False
+                self.log_message(f"[SignalKeyLevels] {ticker} BUY exit filled: {quantity} @ ${price:.2f}")
+        elif order.side in ("sell", "sell_short"):
+            if position and position.quantity < 0:
+                is_entry = True
+                self.log_message(f"[SignalKeyLevels] {ticker} SHORT entry filled: {quantity} @ ${price:.2f}")
+            else:
+                is_entry = False
+                self.log_message(f"[SignalKeyLevels] {ticker} SELL exit filled: {quantity} @ ${price:.2f}")
             
-            # Close trade in tracker if it's an exit
-            if ticker in self._current_trade_ids:
-                trade_id = self._current_trade_ids[ticker]
-                self.trade_tracker.close_trade(
-                    trade_id=trade_id,
-                    date=self.get_datetime(),
-                    exit_price=price,
-                    exit_reason="FILLED"
-                )
-                del self._current_trade_ids[ticker]
+        # Close trade in tracker only if it's an exit
+        if not is_entry and ticker in self._current_trade_ids:
+            trade_id = self._current_trade_ids[ticker]
+            self.trade_tracker.close_trade(
+                trade_id=trade_id,
+                date=self.get_datetime(),
+                exit_price=price,
+                exit_reason="FILLED"
+            )
+            del self._current_trade_ids[ticker]
+            self.current_trailing_stop = None
     
     def after_market_closes(self):
         """Save trades at end of day."""
         SignalKeyLevelsStrategy._last_trade_tracker = self.trade_tracker
+        if not hasattr(self, '_output_filename'):
+            return
         
         output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
         os.makedirs(output_dir, exist_ok=True)
