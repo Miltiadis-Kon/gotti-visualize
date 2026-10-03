@@ -23,5 +23,4 @@ __all__ = [
     'ATRRiskLevels',
     'TRADING_STYLES',
     'key_levels',
-    'book_based',
 ]
