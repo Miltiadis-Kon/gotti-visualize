@@ -302,6 +302,98 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
             except Exception as e:
                 self.log_message(f"Error saving chart: {e}")
 
+    # ──────────────────────────────────────────────────────────────────
+    # Parameter DB hook — wire up when ready
+    # ──────────────────────────────────────────────────────────────────
+
+    # def before_market_opens(self):
+    #     """
+    #     Lumibot calls this ~20 minutes before each session opens.
+    #     Perfect place to refresh strategy parameters from the DB
+    #     so any changes made in the table take effect without a restart.
+    #     """
+    #     self._load_parameters_from_db()
+
+    def _load_parameters_from_db(self):
+        """
+        Fetch this strategy's parameters from the `strategy_parameters` SQLite
+        table and update self.parameters + refreshed instance attributes.
+
+        DB location : logs/strategy_params.db   (relative to repo root)
+        Table schema: see strategies/create_params_db.py
+
+        Lookup key  : get_strategy_name() — must match strategy_name column exactly.
+
+        param_type values
+        -----------------
+        "int"   → int(param_value)
+        "float" → float(param_value)
+        "bool"  → True if param_value.lower() == "true"
+        "str"   → str(param_value)
+
+        Safe to call multiple times; unknown keys are logged and skipped,
+        cast failures are caught individually so one bad row can't block the rest.
+        """
+        import sqlite3
+
+        db_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "logs", "strategy_params.db"
+        )
+        if not os.path.exists(db_path):
+            self.log_message(
+                f"[{self.get_strategy_name()}] Params DB not found at {db_path}. "
+                "Using hardcoded defaults."
+            )
+            return
+
+        try:
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT param_key, param_value, param_type "
+                "FROM strategy_parameters "
+                "WHERE strategy_name = ?",
+                (self.get_strategy_name(),)
+            ).fetchall()
+            conn.close()
+        except Exception as exc:
+            self.log_message(f"[{self.get_strategy_name()}] DB read error: {exc}")
+            return
+
+        type_map = {
+            "int":   int,
+            "float": float,
+            "bool":  lambda x: x.strip().lower() == "true",
+            "str":   str,
+        }
+
+        updated = []
+        for key, value, ptype in rows:
+            caster = type_map.get(ptype, str)
+            try:
+                self.parameters[key] = caster(value)
+                updated.append(f"{key}={value}")
+            except Exception as cast_exc:
+                self.log_message(
+                    f"  ⚠ [{self.get_strategy_name()}] Cannot cast "
+                    f"{key}={value!r} as {ptype}: {cast_exc}"
+                )
+
+        if updated:
+            # Refresh instance attributes that mirror self.parameters
+            self.risk_percent      = self.parameters.get("RISK_PERCENT", self.risk_percent)
+            self.min_importance    = self.parameters.get("MIN_IMPORTANCE", self.min_importance)
+            self.entry_threshold   = self.parameters.get("ENTRY_THRESHOLD", self.entry_threshold)
+            self.exit_threshold    = self.parameters.get("EXIT_THRESHOLD", self.exit_threshold)
+            self.recalc_frequency  = self.parameters.get("RECALC_FREQUENCY", self.recalc_frequency)
+            self.log_message(
+                f"[{self.get_strategy_name()}] DB params loaded ({len(updated)} keys): "
+                + ", ".join(updated)
+            )
+        else:
+            self.log_message(
+                f"[{self.get_strategy_name()}] No DB rows found for this strategy name. "
+                "Keeping defaults."
+            )
 
     ##### ABSTRACT METHODS - CHILD MUST IMPLEMENT #####
     

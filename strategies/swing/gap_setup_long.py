@@ -1,70 +1,67 @@
-import pandas_ta as ta
-from strategies.strat_baseplate import StrategyBaseplate
+"""
+Gap Setup Long (Swing)
+Source: Thomas Bulkowski — adapted to Daily timeframe.
+
+Setup  : Daily gap down ≥ 2 % (today open < yesterday close).
+Entry  : Price pushes back above today's open (gap fade confirmed).
+TP     : Yesterday's close (gap fill target).
+SL     : today_open − 0.5 × ATR (tight intraday stop below gap open).
+"""
+
+from __future__ import annotations
+from typing import Optional, Dict, Any
+import pandas as pd
+from lumibot.entities import Asset
+from .swing_base import SwingStrategyBase
 
 
-class GapSetupLongSwing(StrategyBaseplate):
+class GapSetupLongSwing(SwingStrategyBase):
+
     parameters = {
-        **StrategyBaseplate.parameters,
-        "Ticker": "NVDA",
-        "GapPct": -0.02, # 2% gap down
-        "RiskPct": 0.02,
+        "Ticker":         Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
+        "RiskPct":        0.02,
+        "MAX_PYRAMIDS":   3,
+        "TOTAL_RISK_PCT": 0.06,
         "ATR_Multiplier": 1.5,
-        "TradingStyle": "swing_trading",
+        "ATR_Length":     14,
+        "Lookback":       40,
+        "GapPct":         0.02,    # Minimum gap-down magnitude (2 %)
+        "SL_ATR_Fraction": 0.5,   # SL = today_open − fraction × ATR
+        "Plot": False,
     }
 
-    def initialize(self):
-        super().initialize()
-        self.sleeptime = "1D"
-        self.stop_price = None
-        self.target_price = None
-        self.current_trailing_stop = None
+    def get_strategy_name(self) -> str:
+        return "GapSetupLongSwing"
 
-    def on_trading_iteration(self):
-        symbol = self.parameters["Ticker"]
-        if hasattr(symbol, "symbol"): symbol = symbol.symbol
-        
-        bars = self.get_historical_prices(symbol, 40, "day")
-        if bars is None or len(bars.df) < 5: return
-            
-        df = bars.df
-        df.ta.atr(length=14, append=True)
-        atr = df['ATRr_14'].iloc[-1]
-        
-        current_price = self.get_last_price(symbol)
-        pos = self.get_position(symbol)
-        
-        if pos is None:
-            # Check if today opened significantly lower than yesterday's close
-            yest_close = df['close'].iloc[-2]
-            today_open = df['open'].iloc[-1]
-            gap = (today_open - yest_close) / yest_close
-            
-            # If gap down > 2% and price is pushing up past the open (gap fade)
-            if gap <= self.parameters["GapPct"] and current_price > today_open:
-                # Custom calculation
-                custom_tp = yest_close # Target the gap fill
-                custom_sl = today_open - (atr * 0.5) # Stop below today's open
-                
-                # Pass through ATR optimization function BEFORE order submission
-                risk_levels = self.optimize_sl_tp(
-                    entry_price=current_price,
-                    stop_loss=custom_sl,
-                    take_profit=custom_tp,
-                    side="buy",
-                    atr=atr,
-                    trading_style=self.parameters.get("TradingStyle", "swing_trading"),
-                )
-                self.target_price = risk_levels.take_profit
-                self.stop_price = risk_levels.stop_loss
-                
-                risk_dist = max(0.01, current_price - self.stop_price)
-                qty = (self.get_portfolio_value() * self.parameters["RiskPct"]) / risk_dist
-                if qty >= 1:
-                    order = self.create_order(symbol, int(qty), "buy")
-                    self.submit_order(order)
-        else:
-            if (self.target_price and current_price >= self.target_price) or (self.stop_price and current_price <= self.stop_price):
-                self.sell_all()
-                self.target_price = None
-                self.stop_price = None
-                self.current_trailing_stop = None
+    def get_setup_signal(
+        self, df: pd.DataFrame, atr: float, current_price: float
+    ) -> Optional[Dict[str, Any]]:
+        if len(df) < 3:
+            return None
+
+        min_gap = float(self.parameters.get("GapPct", 0.02))
+        sl_frac = float(self.parameters.get("SL_ATR_Fraction", 0.5))
+
+        yest_close = float(df["close"].iloc[-2])
+        today_open = float(df["open"].iloc[-1])
+
+        gap = (today_open - yest_close) / yest_close  # negative = gap down
+        if gap > -min_gap:
+            return None  # Not a meaningful gap-down
+
+        # Confirm fade: price has moved back above today's open
+        if current_price <= today_open:
+            return None
+
+        take_profit = yest_close                         # gap fill
+        stop_loss   = today_open - (atr * sl_frac)
+
+        if take_profit <= current_price:
+            return None  # Gap already filled
+
+        return {
+            "side":        "buy",
+            "take_profit": take_profit,
+            "stop_loss":   stop_loss,
+            "setup_tag":   f"GAP_LONG_{self.get_datetime().date()}",
+        }
