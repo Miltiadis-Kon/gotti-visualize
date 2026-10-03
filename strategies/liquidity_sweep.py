@@ -97,6 +97,9 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         self.stop_loss: Optional[float] = None
         self.take_profit: Optional[float] = None
         self.active_order = None
+        self.target_level_name: Optional[str] = None
+        self.trade_records: List[Dict[str, Any]] = []
+        self.current_trade: Optional[Dict[str, Any]] = None
 
         self.current_session_date: Optional[datetime.date] = None
 
@@ -199,7 +202,7 @@ class LiquiditySweepStrategy(StrategyBaseplate):
 
     def _get_active_session_targets(
         self, df: pd.DataFrame, current_dt: datetime.datetime
-    ) -> Tuple[Optional[float], Optional[float]]:
+    ) -> Tuple[List[Tuple[float, str]], List[Tuple[float, str]]]:
         """
         Evaluate time gates and map active targets:
           - 03:00 - 05:00 EST: London Open (targets Asian Session 18:00 - 03:00)
@@ -211,7 +214,7 @@ class LiquiditySweepStrategy(StrategyBaseplate):
 
         # Dead Zone: London close + NY lunch (11:30 - 14:00 EST)
         if datetime.time(11, 30) <= current_time < datetime.time(14, 0):
-            return None, None
+            return [], []
 
         # Check Active Windows
         is_london = datetime.time(3, 0) <= current_time <= datetime.time(5, 0)
@@ -219,34 +222,54 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         is_cleanup = datetime.time(14, 0) <= current_time <= datetime.time(15, 45)
 
         if not (is_london or is_nyse or is_cleanup):
-            return None, None
+            return [], []
 
         today = current_dt.date()
         today_bars = df[df["session_date"] == today]
         prior_bars = df[df["session_date"] < today]
 
-        # Previous Day High / Low
-        pdh = float(prior_bars["high"].iloc[-78:].max()) if len(prior_bars) >= 10 else float(df["high"].max())
-        pdl = float(prior_bars["low"].iloc[-78:].min()) if len(prior_bars) >= 10 else float(df["low"].min())
+        # Accurate Previous Day High / Low from prior session
+        prior_dates = prior_bars["session_date"].unique()
+        if len(prior_dates) > 0:
+            last_prior_date = prior_dates[-1]
+            prev_day_bars = prior_bars[prior_bars["session_date"] == last_prior_date]
+            pdh = float(prev_day_bars["high"].max())
+            pdl = float(prev_day_bars["low"].min())
+        else:
+            pdh = float(df["high"].max())
+            pdl = float(df["low"].min())
 
-        if is_nyse:
+        candidate_highs: List[Tuple[float, str]] = []
+        candidate_lows: List[Tuple[float, str]] = []
+
+        if is_london:
+            # Asian Session (18:00 prior day to 03:00 today)
+            asian_bars = prior_bars[prior_bars.index.time >= datetime.time(18, 0)]
+            ash = float(asian_bars["high"].max()) if not asian_bars.empty else pdh
+            asl = float(asian_bars["low"].min()) if not asian_bars.empty else pdl
+            candidate_highs.append((ash, "Asian High"))
+            candidate_lows.append((asl, "Asian Low"))
+
+        elif is_nyse:
             # Overnight session (00:00 to 09:30)
             overnight_bars = today_bars[today_bars.index.time < datetime.time(9, 30)]
             if not overnight_bars.empty:
-                target_high = max(float(overnight_bars["high"].max()), pdh)
-                target_low = min(float(overnight_bars["low"].min()), pdl)
-            else:
-                target_high, target_low = pdh, pdl
-            return target_high, target_low
+                onh = float(overnight_bars["high"].max())
+                onl = float(overnight_bars["low"].min())
+                candidate_highs.append((onh, "Overnight High"))
+                candidate_lows.append((onl, "Overnight Low"))
+            candidate_highs.append((pdh, "Previous Day High"))
+            candidate_lows.append((pdl, "Previous Day Low"))
 
         elif is_cleanup:
             # Untouched session extremes before close
-            target_high = float(today_bars["high"].max()) if not today_bars.empty else pdh
-            target_low = float(today_bars["low"].min()) if not today_bars.empty else pdl
-            return target_high, target_low
+            if not today_bars.empty:
+                candidate_highs.append((float(today_bars["high"].max()), "Session High"))
+                candidate_lows.append((float(today_bars["low"].min()), "Session Low"))
+            candidate_highs.append((pdh, "Previous Day High"))
+            candidate_lows.append((pdl, "Previous Day Low"))
 
-        else:
-            return pdh, pdl
+        return candidate_highs, candidate_lows
 
     # ──────────────────────────────────────────────────────────────────────────
     # Market Structure & Immediate Next Clean Swing Liquidity Targets
@@ -327,10 +350,16 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         is_vwap_flat = bool(last_candle["vwap_slope"] < self.parameters["MinVwapSlope"])
 
         # 2. Active Time Window Targets & Flat VWAP Filter
-        target_high, target_low = self._get_active_session_targets(df, current_dt)
-        if target_high is None or target_low is None or is_vwap_flat:
+        candidate_highs, candidate_lows = self._get_active_session_targets(df, current_dt)
+        if not candidate_highs and not candidate_lows:
             if self.state in ["SWEPT_LONG", "SWEPT_SHORT", "WAITING_FOR_FILL"]:
-                self.log_message(f"[{ticker_str}] Entered Dead Zone or Flat VWAP. Purging pending state.")
+                self.log_message(f"[{ticker_str}] Entered Dead Zone or Non-Trading Window. Purging pending state.")
+                self._reset_to_idle()
+            return
+
+        if is_vwap_flat:
+            if self.state in ["SWEPT_LONG", "SWEPT_SHORT", "WAITING_FOR_FILL"]:
+                self.log_message(f"[{ticker_str}] Flat VWAP detected. Purging pending state.")
                 self._reset_to_idle()
             return
 
@@ -344,33 +373,38 @@ class LiquiditySweepStrategy(StrategyBaseplate):
             if pos is not None and pos.quantity != 0:
                 return
 
-            # Long Sweep (Wick below support target)
-            if last_candle["low"] < target_low and vol_spike:
-                if self._is_clean_level(df, candle_idx, target_low, is_high=False):
+            # Long Sweep (Wick pierces below candidate support level + volume spike)
+            for lvl, lvl_name in candidate_lows:
+                if last_candle["low"] < lvl and last_candle["close"] > (lvl - current_atr * 2.0) and vol_spike:
                     self.trade_model = "REVERSAL" if last_candle["close"] < vwap else "CONTINUATION"
                     self.state = "SWEPT_LONG"
                     self.sweep_extreme = float(last_candle["low"])
                     self.sweep_bar_idx = candle_idx
-                    self.target_level = target_low
-                    self.target_pivot = self._get_last_minor_pivot(df, is_high=True) or target_low
+                    self.target_level = lvl
+                    self.target_level_name = lvl_name
+                    self.target_pivot = self._get_last_minor_pivot(df, is_high=True) or lvl
                     self.log_message(
-                        f"[{ticker_str}] STATE 1 -> SWEPT_LONG: Low={last_candle['low']:.2f}, "
-                        f"Level={target_low:.2f}, Model={self.trade_model}, Extreme={self.sweep_extreme:.2f}"
+                        f"[{ticker_str}] STATE 1 -> SWEPT_LONG ({lvl_name}): Low={last_candle['low']:.2f} < Level={lvl:.2f}, "
+                        f"Model={self.trade_model}, Extreme={self.sweep_extreme:.2f}"
                     )
+                    break
 
-            # Short Sweep (Wick above resistance target)
-            elif last_candle["high"] > target_high and vol_spike:
-                if self._is_clean_level(df, candle_idx, target_high, is_high=True):
-                    self.trade_model = "REVERSAL" if last_candle["close"] > vwap else "CONTINUATION"
-                    self.state = "SWEPT_SHORT"
-                    self.sweep_extreme = float(last_candle["high"])
-                    self.sweep_bar_idx = candle_idx
-                    self.target_level = target_high
-                    self.target_pivot = self._get_last_minor_pivot(df, is_high=False) or target_high
-                    self.log_message(
-                        f"[{ticker_str}] STATE 1 -> SWEPT_SHORT: High={last_candle['high']:.2f}, "
-                        f"Level={target_high:.2f}, Model={self.trade_model}, Extreme={self.sweep_extreme:.2f}"
-                    )
+            # Short Sweep (Wick pierces above candidate resistance level + volume spike)
+            if self.state == "IDLE":
+                for lvl, lvl_name in candidate_highs:
+                    if last_candle["high"] > lvl and last_candle["close"] < (lvl + current_atr * 2.0) and vol_spike:
+                        self.trade_model = "REVERSAL" if last_candle["close"] > vwap else "CONTINUATION"
+                        self.state = "SWEPT_SHORT"
+                        self.sweep_extreme = float(last_candle["high"])
+                        self.sweep_bar_idx = candle_idx
+                        self.target_level = lvl
+                        self.target_level_name = lvl_name
+                        self.target_pivot = self._get_last_minor_pivot(df, is_high=False) or lvl
+                        self.log_message(
+                            f"[{ticker_str}] STATE 1 -> SWEPT_SHORT ({lvl_name}): High={last_candle['high']:.2f} > Level={lvl:.2f}, "
+                            f"Model={self.trade_model}, Extreme={self.sweep_extreme:.2f}"
+                        )
+                        break
 
         # ──────────────────────────────────────────────────────────────────────
         # STATE 2: WAITING FOR THE RECLAIM (THE REJECTION)
@@ -412,6 +446,9 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         # STATE 3: WAITING FOR THE TRIGGER (STRUCTURE SHIFT)
         # ──────────────────────────────────────────────────────────────────────
         elif self.state in ["RECLAIMED_LONG", "RECLAIMED_SHORT"]:
+            fallback_tp_high = max([h[0] for h in candidate_highs]) if candidate_highs else (current_price + 3 * current_atr)
+            fallback_tp_low = min([l[0] for l in candidate_lows]) if candidate_lows else (current_price - 3 * current_atr)
+
             if self.state == "RECLAIMED_LONG":
                 # Fail-safe: Price violates the sweep wick low
                 if last_candle["low"] < self.sweep_extreme:
@@ -424,7 +461,7 @@ class LiquiditySweepStrategy(StrategyBaseplate):
 
                 if (struct_shift or vwap_reclaim) and vol_spike:
                     # Next Immediate Clean Liquidity Pool Target
-                    next_tp = self._get_next_clean_swing_high(df, current_price, fallback=target_high)
+                    next_tp = self._get_next_clean_swing_high(df, current_price, fallback=fallback_tp_high)
                     self._arm_trade_execution(
                         side="buy",
                         pivot_entry=self.target_pivot or vwap,
@@ -445,7 +482,7 @@ class LiquiditySweepStrategy(StrategyBaseplate):
 
                 if (struct_shift or vwap_reclaim) and vol_spike:
                     # Next Immediate Clean Liquidity Pool Target
-                    next_tp = self._get_next_clean_swing_low(df, current_price, fallback=target_low)
+                    next_tp = self._get_next_clean_swing_low(df, current_price, fallback=fallback_tp_low)
                     self._arm_trade_execution(
                         side="sell",
                         pivot_entry=self.target_pivot or vwap,
@@ -538,8 +575,9 @@ class LiquiditySweepStrategy(StrategyBaseplate):
             quantity=qty,
             side=side,
             limit_price=entry_price,
-            stop_loss_price=final_sl,
-            take_profit_price=final_tp,
+            order_class="bracket",
+            secondary_stop_price=final_sl,
+            secondary_limit_price=final_tp,
             time_in_force="gtc"
         )
         self.submit_order(order)
@@ -586,12 +624,38 @@ class LiquiditySweepStrategy(StrategyBaseplate):
 
     def on_filled_order(self, position, order, price, quantity, multiplier):
         """Handle execution fills."""
-        super().on_filled_order(position, order, price, quantity, multiplier)
+        ticker_str = self.parameters["Ticker"].symbol if hasattr(self.parameters["Ticker"], "symbol") else str(self.parameters["Ticker"])
+        
+        # When waiting for limit entry fill
         if self.state == "WAITING_FOR_FILL":
             self.state = "IN_POSITION"
-            self.log_message(f"Trade filled: In position {quantity} @ ${price:.2f}. Bracket orders active on broker.")
+            self.current_trade = {
+                "ticker": ticker_str,
+                "entry_time": str(self.get_datetime()),
+                "side": self.pending_side,
+                "entry_price": float(price),
+                "quantity": float(quantity),
+                "stop_loss": float(self.stop_loss) if self.stop_loss else None,
+                "take_profit": float(self.take_profit) if self.take_profit else None,
+                "sweep_extreme": float(self.sweep_extreme) if self.sweep_extreme else None,
+                "target_level": float(self.target_level) if self.target_level else None,
+                "level_name": self.target_level_name,
+            }
+            self.log_message(f"[{ticker_str}] TRADE FILLED: In position {quantity} @ ${price:.2f}. Bracket orders active.")
+        
         elif self.state == "IN_POSITION":
-            # If position is now closed
+            # If position is now closed or quantity reduced to 0
             if position is None or position.quantity == 0:
-                self.log_message(f"Position closed @ ${price:.2f}.")
+                if self.current_trade:
+                    self.current_trade["exit_time"] = str(self.get_datetime())
+                    self.current_trade["exit_price"] = float(price)
+                    entry_p = self.current_trade["entry_price"]
+                    qty = self.current_trade["quantity"]
+                    side = self.current_trade["side"]
+                    pnl = (price - entry_p) * qty if side == "buy" else (entry_p - price) * qty
+                    self.current_trade["pnl"] = round(pnl, 2)
+                    self.current_trade["pnl_pct"] = round(((price - entry_p) / entry_p) * 100 if side == "buy" else ((entry_p - price) / entry_p) * 100, 2)
+                    self.trade_records.append(self.current_trade)
+                    self.log_message(f"[{ticker_str}] POSITION CLOSED @ ${price:.2f} | PnL: ${pnl:.2f} ({self.current_trade['pnl_pct']}%)")
+                    self.current_trade = None
                 self._reset_to_idle()

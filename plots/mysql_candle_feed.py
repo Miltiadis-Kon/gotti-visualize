@@ -182,9 +182,8 @@ class MySQLCandleFeed:
         asset = Asset(symbol=ticker.upper(), asset_type="stock")
         quote_asset = Asset(symbol="USD", asset_type="forex")
 
-        # Map timeframe to Lumibot timestep
-        ts_map = {"5 min": "5minute", "1 hour": "hour", "1 day": "day"}
-        timestep = ts_map.get(timeframe, "5minute")
+        # Map timeframe to Lumibot timestep (Lumibot only supports 'minute' or 'day')
+        timestep = "day" if "day" in timeframe.lower() else "minute"
 
         return {
             asset: Data(asset, df, timestep=timestep, quote=quote_asset)
