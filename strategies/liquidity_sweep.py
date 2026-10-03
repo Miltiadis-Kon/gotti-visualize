@@ -63,7 +63,6 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
         "TradingStyle": "day_trading",
         "RiskPct": 0.02,                      # 2% portfolio risk budget per trade
-        "MaxDailyLoss": -0.02,                # Halt trading if daily account equity drops 2%
         "MaxReclaimCandles": 3,               # Max candles allowed outside level before acceptance abort
         "MinVwapSlope": 0.05,                 # Disqualify flat VWAP drift
         "VolumeMAPeriod": 20,                 # Period for volume spike evaluation
@@ -99,8 +98,6 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         self.take_profit: Optional[float] = None
         self.active_order = None
 
-        # Risk Tracking
-        self.daily_start_equity: Optional[float] = None
         self.current_session_date: Optional[datetime.date] = None
 
         ticker_sym = self.parameters["Ticker"].symbol if hasattr(self.parameters["Ticker"], "symbol") else str(self.parameters["Ticker"])
@@ -329,19 +326,7 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         vwap = float(last_candle["vwap"])
         is_vwap_flat = bool(last_candle["vwap_slope"] < self.parameters["MinVwapSlope"])
 
-        # 2. Daily Loss Limit Gate
-        portfolio_val = self.get_portfolio_value()
-        if self.current_session_date != current_dt.date():
-            self.current_session_date = current_dt.date()
-            self.daily_start_equity = portfolio_val
-
-        daily_drawdown = (portfolio_val - self.daily_start_equity) / max(1.0, self.daily_start_equity)
-        if daily_drawdown <= self.parameters["MaxDailyLoss"]:
-            self.log_message(f"[{ticker_str}] Daily Max Loss Gate reached ({daily_drawdown:.2%}). Standing down.")
-            self._reset_to_idle()
-            return
-
-        # 3. Active Time Window Targets & Flat VWAP Filter
+        # 2. Active Time Window Targets & Flat VWAP Filter
         target_high, target_low = self._get_active_session_targets(df, current_dt)
         if target_high is None or target_low is None or is_vwap_flat:
             if self.state in ["SWEPT_LONG", "SWEPT_SHORT", "WAITING_FOR_FILL"]:
