@@ -6,6 +6,7 @@ imported using package-style imports (e.g. `from strategies.key_levels ...`).
 """
 
 from strategies.strat_baseplate import StrategyBaseplate, OpeningGap
+from strategies.liquidity_sweep import LiquiditySweepStrategy
 from strategies.risk_management import (
     optimize_sl_tp,
     calculate_atr,
@@ -17,6 +18,7 @@ from strategies.risk_management import (
 __all__ = [
     'StrategyBaseplate',
     'OpeningGap',
+    'LiquiditySweepStrategy',
     'optimize_sl_tp',
     'calculate_atr',
     'calculate_trailing_stop',
