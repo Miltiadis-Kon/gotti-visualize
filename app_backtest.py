@@ -51,6 +51,7 @@ from strategies.swing.gap_setup_short import GapSetupShortSwing
 from strategies.swing.retrace_long import RetraceLongSwing
 from strategies.swing.retrace_short import RetraceShortSwing
 from strategies.swing.rsi_setup import RSISetupSwing
+from strategies.multi_tf_strategy import MultiTimeframeKeyLevelsStrategy
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parent
@@ -123,6 +124,15 @@ STRATEGY_REGISTRY = {
         "datasource": "yahoo",
         "rth_only": False,
         "description": "Mean-reversion entries based on RSI extremes with trend-direction filter.",
+    },
+    "Multi-Timeframe Key Levels (5-Min)": {
+        "cls": MultiTimeframeKeyLevelsStrategy,
+        "timeframe": "5 min",
+        "datasource": "mysql",
+        "rth_only": True,
+        "description": "Combines multi-resolution S/R key levels (1D, 4H, 15m) with Fibonacci retracements "
+                       "on 5-minute RTH candles. Fast in-memory multi-timeframe resampling, ATR-buffered "
+                       "bracket orders, and R:R >= 1.5 trade execution.",
     },
 }
 
@@ -422,7 +432,8 @@ def run_one_backtest(ticker, strategy_cfg, bt_start, bt_end, data_start, budget_
 
     asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
 
-    if datasource == "mysql":
+    if datasource in ["mysql", "multitf"]:
+        # Try local MySQL institutional candle feed first
         df_raw = candle_feed.get_candles_df(
             ticker,
             timeframe=timeframe,
@@ -431,16 +442,28 @@ def run_one_backtest(ticker, strategy_cfg, bt_start, bt_end, data_start, budget_
             rth_only=rth_only
         )
         if df_raw.empty or len(df_raw) < 50:
-            raise ValueError(f"Insufficient data from MySQL for {ticker} ({len(df_raw)} bars)")
-        log_cb(f"  Loaded {len(df_raw):,} RTH candles from MySQL.")
+            log_cb(f"  Local MySQL has no 5m data for {ticker}. Fetching from Yahoo Finance...")
+            import yfinance as yf
+            from lumibot.entities import Data
+            df_yf = yf.download(ticker, start=data_start, end=bt_end.strftime("%Y-%m-%d"), interval="5m", progress=False)
+            if isinstance(df_yf.columns, pd.MultiIndex):
+                df_yf.columns = df_yf.columns.droplevel(1)
+            df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}, inplace=True)
+            df_raw = df_yf.copy()
+            if df_raw.empty or len(df_raw) < 50:
+                raise ValueError(f"Insufficient 5-min data from Yahoo for {ticker} ({len(df_raw)} bars)")
+            log_cb(f"  Loaded {len(df_raw):,} 5-min Yahoo bars.")
+            pandas_data = {asset: Data(asset, df_raw, timestep="minute")}
+        else:
+            log_cb(f"  Loaded {len(df_raw):,} 5-minute RTH candles from MySQL.")
+            pandas_data = candle_feed.create_lumibot_pandas_data(
+                ticker,
+                timeframe=timeframe,
+                start_date=data_start,
+                end_date=bt_end.strftime("%Y-%m-%d %H:%M:%S"),
+                rth_only=rth_only
+            )
 
-        pandas_data = candle_feed.create_lumibot_pandas_data(
-            ticker,
-            timeframe=timeframe,
-            start_date=data_start,
-            end_date=bt_end.strftime("%Y-%m-%d %H:%M:%S"),
-            rth_only=rth_only
-        )
         log_cb(f"  Running backtest on {ticker}...")
         results, strategy_obj = strat_cls.run_backtest(
             datasource_class=PandasDataBacktesting,
@@ -451,7 +474,7 @@ def run_one_backtest(ticker, strategy_cfg, bt_start, bt_end, data_start, budget_
             parameters={"Ticker": asset, "Plot": False},
             show_plot=False
         )
-    else:
+    elif datasource == "yahoo":
         log_cb(f"  Fetching daily data from Yahoo Finance for {ticker}...")
         results, strategy_obj = strat_cls.run_backtest(
             datasource_class=YahooDataBacktesting,
@@ -462,13 +485,40 @@ def run_one_backtest(ticker, strategy_cfg, bt_start, bt_end, data_start, budget_
             show_plot=False
         )
         df_raw = None
+    else:
+        raise ValueError(f"Unknown datasource: {datasource}")
 
-    # Extract metrics
+    # Extract metrics from Lumibot results
     tot_return = results.get("total_return", 0.0) * 100.0
     mdd_raw = results.get("max_drawdown", 0.0)
     mdd = (mdd_raw.get("drawdown", 0.0) if isinstance(mdd_raw, dict) else mdd_raw) * 100.0
 
-    trades = getattr(strategy_obj, "trade_records", [])
+    # ── Normalise trade records ──────────────────────────────────────────────
+    raw_trades = getattr(strategy_obj, "trade_records", None)
+    tracker = getattr(strategy_obj, "trade_tracker", None)
+
+    if raw_trades is not None:
+        # Already normalised dicts
+        trades = raw_trades
+    elif tracker is not None:
+        # Convert Trade dataclass → standard dict
+        trades = []
+        for t in tracker.closed_trades:
+            trades.append({
+                "entry_time":  str(t.date_executed),
+                "exit_time":   str(t.date_completed) if t.date_completed else None,
+                "side":        "buy" if t.trade_type.upper() == "BUY" else "sell",
+                "entry_price": t.entry_price,
+                "exit_price":  t.exit_price,
+                "quantity":    t.quantity,
+                "stop_loss":   t.stop_loss,
+                "take_profit": t.take_profit,
+                "pnl":         t.pnl if t.pnl is not None else 0.0,
+                "pnl_pct":     t.pnl_percent if t.pnl_percent is not None else 0.0,
+            })
+    else:
+        trades = []
+
     total_trades = len(trades)
     wins = [t for t in trades if t.get("pnl", 0.0) > 0]
     losses = [t for t in trades if t.get("pnl", 0.0) < 0]

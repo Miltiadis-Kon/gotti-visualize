@@ -1,867 +1,484 @@
 """
-Multi-Timeframe Key Levels Strategy (v2)
+Multi-Timeframe Key Levels Strategy (Modernized)
+================================================
+Combines multi-resolution Support/Resistance key levels (1D, 4H, 15m) with
+Fibonacci retracement setups on 5-minute RTH intraday execution.
 
-Combines Fibonacci retracement analysis with S/R key levels:
-- Recalculates every 15 minutes via iteration counter (3 × 5min sleeptime)
-- Uses analyze() from strategies.key_levels for multi-resolution analysis
-- Fibonacci trade setups drive primary entry/exit (entry_price, stop_loss, take_profit)
-- S/R level entries as secondary signals (existing LONG at support / SHORT at resistance)
-- Noise reduction: Fibonacci signal prioritized when overlapping with S/R
-
-Data source: analyze(ticker, resolutions=['1D', '4H', '15m'])
+Architecture:
+  - Subclasses StrategyBaseplate for unified ATR risk framework, order tracking, and plotting.
+  - Generates multi-timeframe S/R levels and Fibonacci setups entirely in-memory from
+    historical 5-minute candles via pandas resampling (no external network latency).
+  - Priority logic: Fibonacci 0.618 retracement setups prioritized over S/R bounces.
+  - S/R bounce entries validated for minimum Risk-to-Reward (>= 1.5).
+  - ATR-buffered bracket orders manage trade lifecycle automatically.
+  - Exports standardized trade records for unified dashboard and interactive Plotly charting.
 """
+
+from __future__ import annotations
+
+import os
+import sys
+from math import floor
+import datetime
+from typing import Dict, Any, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
-import sys
-import os
-import io
-import contextlib
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
-import yfinance as yf
+import pandas_ta as ta
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-from lumibot.backtesting import YahooDataBacktesting
 from lumibot.entities import Asset
-from dotenv import load_dotenv
-import lumibot.tools.helpers
-lumibot.tools.helpers.print_progress_bar = lambda *args, **kwargs: None
+from lumibot.backtesting import PandasDataBacktesting
 
-
-# Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from base_key_levels_strategy import BaseKeyLevelsStrategy
-from key_levels.analyzer import analyze
-
-load_dotenv()
+from strat_baseplate import StrategyBaseplate
+from key_levels.key_levels import find_key_levels, merge_key_levels
+from key_levels.fibonacci_levels import get_fibonacci_trade_setups, find_fibonacci_levels
 
 
-class MultiTimeframeKeyLevelsStrategy(BaseKeyLevelsStrategy):
+class MultiTimeframeKeyLevelsStrategy(StrategyBaseplate):
     """
-    Multi-Timeframe Key Levels Trading Strategy (v2).
-
-    Primary signals: Fibonacci trade setups (entry at 0.618 retracement, SL at 0.786,
-    TP at swing extreme). Secondary signals: S/R level entries with R:R filtering.
-
-    Every 15 minutes (3 iterations × 5min sleeptime), calls analyze() to refresh:
-    - Merged S/R key levels across 1D, 4H, 15m
-    - Fibonacci trade setups (latest pattern per resolution)
-
-    Noise reduction: if Fibonacci and S/R entries are within FIB_SR_PROXIMITY of
-    each other, only the Fibonacci signal is used. S/R signals near inactive Fibonacci
-    entry zones are also suppressed.
+    Multi-Timeframe Key Levels & Fibonacci Strategy.
     """
 
-    parameters = {
+    parameters: Dict[str, Any] = {
+        **StrategyBaseplate.parameters,
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
-        "RISK_PERCENT": 0.1,          # Risk 10% per trade
-        "MIN_IMPORTANCE": 3,           # Minimum importance for S/R levels
-        "TIMEFRAMES": ['1d', '4h', '1h', '15m', '5m'],  # kept for base compat
-        "PRICE_THRESHOLD": 0.5,        # Threshold for merging S/R levels
-        "RECALC_FREQUENCY": "daily",   # kept for base compat (overridden by counter)
-
-        # Entry/Exit thresholds
-        "ENTRY_THRESHOLD": 0.005,      # 0.5% tolerance for level matching
-        "EXIT_THRESHOLD": 0.01,        # 1% tolerance for TP/SL matching
-
-        # S/R-specific thresholds
-        "TP_THRESHOLD": 0.02,          # Take profit 2% before resistance
-        "SL_THRESHOLD": 0.05,          # Stop loss 5% below support
-        "MIN_RISK_REWARD": 1.5,        # Minimum R:R ratio
-
-        # Analyzer configuration
-        "ANALYSIS_RESOLUTIONS": ['1D', '4H', '15m'],  # Resolutions for analyze()
-        "RECALC_ITERATIONS": 3,        # Recalc every N iterations (3 × 5min = 15min)
-        "FIB_SR_PROXIMITY": 0.02,      # 2% proximity threshold for noise reduction
-        "USE_ALPACA": False,           # Use Yahoo Finance by default
+        "TradingStyle": "day_trading",
+        "RiskPct": 0.02,                      # 2% portfolio risk budget per trade
+        "MinRiskReward": 1.5,                 # Minimum 1.5:1 Risk/Reward
+        "MinImportance": 2,                   # Minimum S/R importance threshold
+        "EntryTolerancePct": 0.004,           # 0.4% price tolerance around key levels
+        "FibSRProximity": 0.02,               # 2% proximity threshold for noise reduction
+        "ATR_Length": 14,                     # ATR lookback period
+        "ATR_Stop_Buffer_Multiplier": 0.5,    # ATR buffer added to stop loss
+        "TickSize": 0.01,                     # Minimum tick offset
+        "Plot": True,
     }
 
-    # Class-level analysis cache (persists across backtesting iterations)
-    _analysis_cache = {}
+    # Class-level cache for multi-timeframe analysis across backtest iterations
+    _analysis_cache: Dict[str, Dict[str, Any]] = {}
 
-    def get_strategy_name(self) -> str:
-        return "MultiTFKeyLevels"
+    # ──────────────────────────────────────────────────────────────────────────
+    # Lifecycle
+    # ──────────────────────────────────────────────────────────────────────────
 
-    def on_strategy_start(self):
-        """Initialize strategy-specific state."""
-        # S/R threshold parameters
-        self.tp_threshold = self.parameters.get("TP_THRESHOLD", 0.02)
-        self.sl_threshold = self.parameters.get("SL_THRESHOLD", 0.05)
-        self.min_risk_reward = self.parameters.get("MIN_RISK_REWARD", 1.5)
+    def initialize(self):
+        super().initialize()
+        self.sleeptime = "5M"  # 5-minute candles
 
-        # Analyzer parameters
-        self._recalc_every = self.parameters.get("RECALC_ITERATIONS", 3)
-        self._iteration_count = 0
-        self._analysis_loaded = False
-        self._last_analysis_date = None
-        self.fib_trade_setups = pd.DataFrame()
-        self.fib_sr_proximity = self.parameters.get("FIB_SR_PROXIMITY", 0.02)
-        self._analysis_resolutions = self.parameters.get(
-            "ANALYSIS_RESOLUTIONS", ['1D', '4H', '15m']
-        )
-        self._use_alpaca = self.parameters.get("USE_ALPACA", False)
+        # State tracking
+        self.state: str = "IDLE"  # "IDLE", "WAITING_FOR_FILL", "IN_POSITION"
+        self.active_order = None
+        self.pending_side: Optional[str] = None
+        self.entry_price: Optional[float] = None
+        self.stop_loss: Optional[float] = None
+        self.take_profit: Optional[float] = None
+        self.trade_setup_type: Optional[str] = None
 
-        # Ensure S/R levels start as empty DataFrames (not None)
-        # so base class _handle_entry() doesn't bail early
-        self.support_levels = pd.DataFrame()
-        self.resistance_levels = pd.DataFrame()
-        self.active_trade_map = {}
+        # Level data
+        self.merged_levels: pd.DataFrame = pd.DataFrame()
+        self.support_levels: pd.DataFrame = pd.DataFrame()
+        self.resistance_levels: pd.DataFrame = pd.DataFrame()
+        self.fib_trade_setups: pd.DataFrame = pd.DataFrame()
+        self.last_analysis_date: Optional[datetime.date] = None
 
-        self.log_message(
-            f"[{self.get_strategy_name()}] Initialized (FIB+SR, LONG+SHORT) - "
-            f"Min R:R={self.min_risk_reward}, Recalc every {self._recalc_every} "
-            f"iterations, Resolutions={self._analysis_resolutions}"
-        )
+        # Standardized trade records
+        self.trade_records: List[Dict[str, Any]] = []
+        self.current_trade: Optional[Dict[str, Any]] = None
 
-    # ─────────────────── LIFECYCLE OVERRIDES ───────────────────
+        ticker_sym = self.parameters["Ticker"].symbol if hasattr(self.parameters["Ticker"], "symbol") else str(self.parameters["Ticker"])
+        self.log_message(f"[{ticker_sym}] MultiTimeframeKeyLevelsStrategy initialized. Min R:R={self.parameters['MinRiskReward']}.")
 
-    def on_trading_iteration(self):
+    # ──────────────────────────────────────────────────────────────────────────
+    # Indicators & In-Memory Multi-Timeframe Resampling
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _compute_intraday_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute Volume MA, ATR(14), and 09:30-anchored Session VWAP."""
+        data = df.copy()
+
+        # Volume MA
+        data["vol_ma"] = data["volume"].rolling(20).mean()
+
+        # ATR(14)
+        atr_len = int(self.parameters.get("ATR_Length", 14))
+        data.ta.atr(length=atr_len, append=True)
+        atr_cols = [c for c in data.columns if c.startswith("ATRr_")]
+        data["atr"] = data[atr_cols[0]] if atr_cols else 1.0
+
+        # Session VWAP anchored to 09:30 EST
+        data["typical_price"] = (data["high"] + data["low"] + data["close"]) / 3.0
+        data["pv"] = data["typical_price"] * data["volume"]
+
+        if isinstance(data.index, pd.DatetimeIndex):
+            idx_ny = data.index.tz_convert("America/New_York") if data.index.tz else data.index.tz_localize("UTC").tz_convert("America/New_York")
+            session_dates = idx_ny.date
+            times = idx_ny.time
+        else:
+            session_dates = np.zeros(len(data))
+            times = [datetime.time(9, 30)] * len(data)
+
+        data["session_date"] = session_dates
+        rth_pv = np.where(times >= datetime.time(9, 30), data["pv"], 0.0)
+        rth_vol = np.where(times >= datetime.time(9, 30), data["volume"], 0.0)
+        data["cum_pv"] = pd.Series(rth_pv, index=data.index).groupby(data["session_date"]).cumsum()
+        data["cum_vol"] = pd.Series(rth_vol, index=data.index).groupby(data["session_date"]).cumsum()
+        data["vwap"] = data["cum_pv"] / data["cum_vol"].replace(0, np.nan)
+        data["vwap"] = data["vwap"].ffill().bfill()
+
+        return data
+
+    def _refresh_multi_tf_analysis(self, df_5m: pd.DataFrame, current_date: datetime.date, current_price: float):
         """
-        Main trading loop — overrides base class to use counter-based
-        recalculation with analyze() instead of the old KeyLevels class.
+        Fast in-memory multi-timeframe level generator:
+        Resamples historical 5m bars up to current date into 1D, 4H, and 15m,
+        then detects merged S/R key levels and Fibonacci setups without network calls.
         """
-        ticker = self.parameters["Ticker"]
-
-        # Get current price
-        current_price = self.get_last_price(ticker)
-        if current_price is None:
-            return
-
-        # Counter-based recalculation (every N iterations = 15 min)
-        self._iteration_count += 1
-        if self._iteration_count >= self._recalc_every or not self._analysis_loaded:
-            self._iteration_count = 0
-            self._run_analysis()
-
-        # Need at least one successful analysis to proceed
-        if not self._analysis_loaded:
-            return
-
-        # Get current position
-        position = self.get_position(ticker)
-        has_position = position is not None and position.quantity != 0
-
-        # Check for entry (calls get_entry_signal via base _handle_entry)
-        self._handle_entry(current_price)
-
-        # If position exists, check for exit
-        if has_position:
-            self._handle_exit(current_price, position)
-
-    # ─────────────────── ANALYSIS ENGINE ───────────────────
-
-    def _run_analysis(self):
-        """
-        Run analyze() to refresh S/R levels and Fibonacci trade setups.
-
-        Uses a date-based cache: if the same ticker+date was already analyzed
-        (common during backtesting where intraday data doesn't change), the
-        cached result is reused instantly.
-        """
-        ticker_symbol = self.parameters["Ticker"].symbol
-        current_dt = self.get_datetime()
-        current_date = current_dt.date()
-
-        # Cache key: same ticker + same date = same levels
-        cache_key = f"{ticker_symbol}_{current_date}"
+        ticker_sym = self.parameters["Ticker"].symbol if hasattr(self.parameters["Ticker"], "symbol") else str(self.parameters["Ticker"])
+        cache_key = f"{ticker_sym}_{current_date}"
 
         if cache_key in MultiTimeframeKeyLevelsStrategy._analysis_cache:
             cached = MultiTimeframeKeyLevelsStrategy._analysis_cache[cache_key]
-            self.merged_levels = cached['merged']
-            self.support_levels = cached['support']
-            self.resistance_levels = cached['resistance']
-            self.fib_trade_setups = cached['fib_setups']
-            self._analysis_loaded = True
-            # Only log on first load of each day
-            if current_date != self._last_analysis_date:
-                self.log_message(
-                    f"[{self.get_strategy_name()}] Loaded cached analysis for {current_date}: "
-                    f"{len(self.support_levels)} supports, "
-                    f"{len(self.resistance_levels)} resistances, "
-                    f"{len(self.fib_trade_setups)} fib setups"
-                )
-                self._last_analysis_date = current_date
+            self.merged_levels = cached["merged"]
+            self.support_levels = cached["support"]
+            self.resistance_levels = cached["resistance"]
+            self.fib_trade_setups = cached["fib"]
+            self.last_analysis_date = current_date
             return
 
-        # Fetch fresh analysis (suppress analyze() print output)
+        # Use historical bars strictly prior to or including current date
+        history = df_5m.copy()
+        if history.empty or len(history) < 60:
+            return
+
+        # 1. Resample to 1D, 4H, and 15m
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                result = analyze(
-                    ticker_symbol,
-                    resolutions=self._analysis_resolutions,
-                    use_alpaca=self._use_alpaca,
-                    as_of_date=current_dt
-                )
+            df_1d = history.resample("1D").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna()
+            df_4h = history.resample("4h").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna()
+            df_15m = history.resample("15min").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna()
 
-            # Populate S/R levels
-            if not result.merged_levels.empty:
-                self.merged_levels = result.merged_levels
-                filtered = result.merged_levels[
-                    result.merged_levels['importance'] >= self.min_importance
-                ]
-                self.support_levels = filtered[
-                    filtered['type'] == 'support'
-                ].copy()
-                self.resistance_levels = filtered[
-                    filtered['type'] == 'resistance'
-                ].copy()
+            # 2. Key Levels Detection across resolutions
+            levels_list = []
+            if len(df_1d) >= 15:
+                lvl_1d = find_key_levels(df_1d, resolution="1D")
+                if not lvl_1d.empty:
+                    levels_list.append(lvl_1d)
+
+            if len(df_4h) >= 20:
+                lvl_4h = find_key_levels(df_4h, resolution="4H")
+                if not lvl_4h.empty:
+                    levels_list.append(lvl_4h)
+
+            if len(df_15m) >= 30:
+                lvl_15m = find_key_levels(df_15m, resolution="15m")
+                if not lvl_15m.empty:
+                    levels_list.append(lvl_15m)
+
+            if levels_list:
+                all_raw_levels = pd.concat(levels_list, ignore_index=True)
+                merged = merge_key_levels(all_raw_levels, price_threshold=0.5)
             else:
-                self.merged_levels = pd.DataFrame()
+                merged = pd.DataFrame(columns=["level_price", "type", "touch_count", "importance"])
+
+            # Filter by minimum importance
+            min_imp = int(self.parameters.get("MinImportance", 2))
+            if not merged.empty:
+                valid_levels = merged[merged["importance"] >= min_imp]
+                self.support_levels = valid_levels[valid_levels["level_price"] < current_price].sort_values("level_price", ascending=False).reset_index(drop=True)
+                self.resistance_levels = valid_levels[valid_levels["level_price"] > current_price].sort_values("level_price", ascending=True).reset_index(drop=True)
+            else:
                 self.support_levels = pd.DataFrame()
                 self.resistance_levels = pd.DataFrame()
 
-            # Store Fibonacci trade setups
-            self.fib_trade_setups = (
-                result.trade_setups
-                if not result.trade_setups.empty
-                else pd.DataFrame()
-            )
+            self.merged_levels = merged
 
-            self._analysis_loaded = True
-            self._last_analysis_date = current_date
+            # 3. Fibonacci Setups across resolutions
+            fib_list = []
+            if len(df_1d) >= 15:
+                f_1d = get_fibonacci_trade_setups(df_1d, resolution="1D")
+                if not f_1d.empty:
+                    fib_list.append(f_1d)
 
-            # Cache the result
-            MultiTimeframeKeyLevelsStrategy._analysis_cache[cache_key] = {
-                'merged': self.merged_levels,
-                'support': self.support_levels,
-                'resistance': self.resistance_levels,
-                'fib_setups': self.fib_trade_setups,
-            }
+            if len(df_4h) >= 20:
+                f_4h = get_fibonacci_trade_setups(df_4h, resolution="4H")
+                if not f_4h.empty:
+                    fib_list.append(f_4h)
 
-            # Log levels history (for base class after_market_closes persistence)
-            if not self.support_levels.empty or not self.resistance_levels.empty:
-                self._log_levels_to_history(current_date)
+            if len(df_15m) >= 30:
+                f_15m = get_fibonacci_trade_setups(df_15m, resolution="15m")
+                if not f_15m.empty:
+                    fib_list.append(f_15m)
 
-            self.log_message(
-                f"[{self.get_strategy_name()}] Analysis refreshed ({current_date}): "
-                f"{len(self.support_levels)} supports, "
-                f"{len(self.resistance_levels)} resistances, "
-                f"{len(self.fib_trade_setups)} fib setups"
-            )
-
-            # Log the generated key levels out perfectly as the user requested
-            msg = f"\n{'='*60}\nKEY LEVELS GENERATED FOR {current_date}\n{'='*60}\n"
-            if not self.support_levels.empty:
-                msg += f"SUPPORT LEVELS:\n{self.support_levels.to_string()}\n"
-            if not self.resistance_levels.empty:
-                msg += f"\nRESISTANCE LEVELS:\n{self.resistance_levels.to_string()}\n"
-            if not self.fib_trade_setups.empty:
-                msg += f"\nFIBONACCI SETUPS:\n{self.fib_trade_setups.to_string()}\n"
-            msg += f"{'='*60}\n"
-            print(msg)
-            self.log_message(msg)
-            
-        except Exception as e:
-            self.log_message(f"[{self.get_strategy_name()}] Analysis error: {e}")
-            # Keep previous levels if available
-            if not self._analysis_loaded:
-                self.support_levels = pd.DataFrame()
-                self.resistance_levels = pd.DataFrame()
+            if fib_list:
+                self.fib_trade_setups = pd.concat(fib_list, ignore_index=True)
+            else:
                 self.fib_trade_setups = pd.DataFrame()
 
-    # ─────────────────── ENTRY SIGNALS ───────────────────
+            # Store in cache
+            MultiTimeframeKeyLevelsStrategy._analysis_cache[cache_key] = {
+                "merged": self.merged_levels,
+                "support": self.support_levels,
+                "resistance": self.resistance_levels,
+                "fib": self.fib_trade_setups,
+            }
+            self.last_analysis_date = current_date
 
-    def get_entry_signal(
-        self,
-        current_price: float,
-        support_levels: pd.DataFrame,
-        resistance_levels: pd.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Combined entry logic: Fibonacci primary, S/R secondary.
+        except Exception as e:
+            self.log_message(f"[{ticker_sym}] Multi-TF level generation error: {e}")
 
-        Priority order:
-        1. Fibonacci trade setups (uptrend → BUY, downtrend → SELL)
-        2. S/R level entries (existing LONG at support / SHORT at resistance)
+    # ──────────────────────────────────────────────────────────────────────────
+    # Trading Iteration
+    # ──────────────────────────────────────────────────────────────────────────
 
-        Noise reduction:
-        - If both Fibonacci and S/R signal → use Fibonacci
-        - If only S/R signal but it's near a Fibonacci entry zone → suppress it
-        """
-        # Check Fibonacci entry signals
-        fib_signal = self._check_fib_entry(current_price)
+    def on_trading_iteration(self):
+        symbol = self.parameters["Ticker"]
+        ticker_str = symbol.symbol if hasattr(symbol, "symbol") else str(symbol)
 
-        # Check S/R entry signals (existing logic)
-        sr_signal = self._check_sr_entry(current_price, support_levels, resistance_levels)
+        # 1. Historical Prices (5-Minute candles)
+        bars = self.get_historical_prices(symbol, 1500, "5M")
+        if bars is None or len(bars.df) < 50:
+            return
 
-        # ── Priority & noise reduction ──
+        df = self._compute_intraday_indicators(bars.df)
+        current_dt = self.get_datetime()
+        current_time = current_dt.time()
+        current_price = self.get_last_price(symbol)
+        if current_price is None:
+            return
 
-        # Case 1: Fibonacci signal exists → always use it
-        if fib_signal:
-            if sr_signal:
-                self.log_message(
-                    f"[{self.get_strategy_name()}] Fib + S/R both signal — "
-                    f"using Fibonacci (noise reduction)"
-                )
-            return fib_signal
+        last_candle = df.iloc[-1]
+        current_atr = float(last_candle["atr"])
 
-        # Case 2: Only S/R signal — check if it's near a Fibonacci zone
-        if sr_signal:
-            if self._is_near_fib_zone(sr_signal['entry_price']):
-                self.log_message(
-                    f"[{self.get_strategy_name()}] S/R signal suppressed "
-                    f"(near Fibonacci entry zone — waiting for exact fib entry)"
-                )
-                return None
-            return sr_signal
+        # 2. Time Gate: Only trade during Regular Market Hours (09:45 to 15:45 EST)
+        if current_time < datetime.time(9, 45) or current_time > datetime.time(15, 45):
+            if self.state == "WAITING_FOR_FILL":
+                self._reset_to_idle()
+            return
 
-        return None
+        # 3. Refresh Multi-Timeframe Levels (Once per day or when cache is empty)
+        today = current_dt.date()
+        if self.last_analysis_date != today or self.merged_levels.empty:
+            self._refresh_multi_tf_analysis(df, today, current_price)
 
-    def _check_fib_entry(self, current_price: float) -> Optional[Dict[str, Any]]:
-        """
-        Check if current price matches any Fibonacci trade setup entry.
+        # 4. Check Open Position
+        pos = self.get_position(symbol)
+        if pos is not None and pos.quantity != 0:
+            return
 
-        For uptrend patterns: BUY at 0.618 retracement, TP at swing high, SL at 0.786
-        For downtrend patterns: SELL at 0.618 retracement, TP at swing low, SL at 0.786
-        """
-        if self.fib_trade_setups.empty:
-            return None
+        if self.state != "IDLE":
+            return
 
-        for _, setup in self.fib_trade_setups.iterrows():
-            entry_price = setup['entry_price']
-            tolerance = entry_price * self.entry_threshold
+        # ──────────────────────────────────────────────────────────────────────
+        # SIGNAL EVALUATION
+        # ──────────────────────────────────────────────────────────────────────
+        entry_tol = float(self.parameters.get("EntryTolerancePct", 0.004))
+        min_rr = float(self.parameters.get("MinRiskReward", 1.5))
+        atr_buf = current_atr * float(self.parameters.get("ATR_Stop_Buffer_Multiplier", 0.5))
 
-            # Check if price is at the fibonacci entry level
-            if not (entry_price - tolerance <= current_price <= entry_price + tolerance):
-                continue
+        chosen_signal = None
 
-            # Determine trade direction from fibonacci trend
-            trend = setup['trend']
-            trade_type = 'BUY' if trend == 'uptrend' else 'SELL'
+        # PRIORITY 1: Fibonacci Trade Setups (0.618 Retracement)
+        if not self.fib_trade_setups.empty:
+            for _, setup in self.fib_trade_setups.iterrows():
+                fib_entry = float(setup["entry_price"])
+                tol = fib_entry * entry_tol
 
-            take_profit = setup['take_profit']
-            stop_loss = setup['stop_loss']
+                if abs(current_price - fib_entry) <= tol:
+                    trend = str(setup["trend"]).lower()
+                    side = "buy" if trend == "uptrend" else "sell"
+                    raw_tp = float(setup["take_profit"])
+                    raw_sl = float(setup["stop_loss"])
 
-            # Validate R:R ratio
-            if trade_type == 'BUY':
-                risk = current_price - stop_loss
-                reward = take_profit - current_price
-            else:
-                risk = stop_loss - current_price
-                reward = current_price - take_profit
+                    # Apply ATR buffer to Stop Loss
+                    if side == "buy":
+                        sl = round(raw_sl - atr_buf, 2)
+                        tp = round(raw_tp, 2)
+                        risk = current_price - sl
+                        reward = tp - current_price
+                    else:
+                        sl = round(raw_sl + atr_buf, 2)
+                        tp = round(raw_tp, 2)
+                        risk = sl - current_price
+                        reward = current_price - tp
 
-            risk_reward = reward / risk if risk > 0 else 0
+                    if risk > 0 and (reward / risk) >= min_rr:
+                        chosen_signal = {
+                            "side": side,
+                            "entry": current_price,
+                            "stop_loss": sl,
+                            "take_profit": tp,
+                            "reason": f"FIB_{trend.upper()}_0.618 ({setup.get('resolution', 'TF')})",
+                        }
+                        break
 
-            if risk_reward < self.min_risk_reward:
-                continue
+        # PRIORITY 2: Support & Resistance Bounces (Secondary Signal)
+        if chosen_signal is None:
+            # Check Support Bounce (Long)
+            if not self.support_levels.empty:
+                nearest_sup = float(self.support_levels.iloc[0]["level_price"])
+                if abs(current_price - nearest_sup) <= (nearest_sup * entry_tol):
+                    # Target nearest resistance or 2x ATR
+                    if not self.resistance_levels.empty:
+                        target_tp = float(self.resistance_levels.iloc[0]["level_price"])
+                    else:
+                        target_tp = current_price + (2.5 * current_atr)
 
-            resolution = setup.get('resolution', 'N/A')
-            pattern_id = setup.get('pattern_id', 'N/A')
-            self.log_message(
-                f"[{self.get_strategy_name()}] FIB {trade_type} signal "
-                f"({resolution}, {pattern_id}): "
-                f"Entry ${entry_price:.2f}, TP ${take_profit:.2f}, "
-                f"SL ${stop_loss:.2f}, R:R={risk_reward:.2f}"
+                    sl = round(nearest_sup - atr_buf, 2)
+                    tp = round(target_tp, 2)
+                    risk = current_price - sl
+                    reward = tp - current_price
+
+                    if risk > 0 and (reward / risk) >= min_rr:
+                        # Noise reduction: check if near inactive Fib zone
+                        is_near_fib = False
+                        if not self.fib_trade_setups.empty:
+                            for _, fb in self.fib_trade_setups.iterrows():
+                                if abs(current_price - float(fb["entry_price"])) / current_price < float(self.parameters["FibSRProximity"]):
+                                    is_near_fib = True
+                                    break
+                        if not is_near_fib:
+                            chosen_signal = {
+                                "side": "buy",
+                                "entry": current_price,
+                                "stop_loss": sl,
+                                "take_profit": tp,
+                                "reason": f"SR_SUPPORT_BOUNCE (${nearest_sup:.2f})",
+                            }
+
+            # Check Resistance Rejection (Short)
+            if chosen_signal is None and not self.resistance_levels.empty:
+                nearest_res = float(self.resistance_levels.iloc[0]["level_price"])
+                if abs(current_price - nearest_res) <= (nearest_res * entry_tol):
+                    if not self.support_levels.empty:
+                        target_tp = float(self.support_levels.iloc[0]["level_price"])
+                    else:
+                        target_tp = current_price - (2.5 * current_atr)
+
+                    sl = round(nearest_res + atr_buf, 2)
+                    tp = round(target_tp, 2)
+                    risk = sl - current_price
+                    reward = current_price - tp
+
+                    if risk > 0 and (reward / risk) >= min_rr:
+                        chosen_signal = {
+                            "side": "sell",
+                            "entry": current_price,
+                            "stop_loss": sl,
+                            "take_profit": tp,
+                            "reason": f"SR_RESISTANCE_REJECT (${nearest_res:.2f})",
+                        }
+
+        # ──────────────────────────────────────────────────────────────────────
+        # ORDER EXECUTION (BRACKET ORDER)
+        # ──────────────────────────────────────────────────────────────────────
+        if chosen_signal:
+            self._arm_trade_execution(
+                side=chosen_signal["side"],
+                entry=chosen_signal["entry"],
+                stop_loss=chosen_signal["stop_loss"],
+                take_profit=chosen_signal["take_profit"],
+                reason=chosen_signal["reason"],
             )
 
-            # Map swing extremes to support/resistance for trade tracking
-            support_level = setup.get('low_price', stop_loss)
-            resistance_level = setup.get('high_price', take_profit)
+    def _arm_trade_execution(self, side: str, entry: float, stop_loss: float, take_profit: float, reason: str):
+        """Size position based on 2% risk budget and submit bracket limit order."""
+        symbol = self.parameters["Ticker"]
+        ticker_str = symbol.symbol if hasattr(symbol, "symbol") else str(symbol)
 
-            return {
-                'trade_type': trade_type,
-                'entry_price': current_price,
-                'take_profit': round(take_profit, 2),
-                'stop_loss': round(stop_loss, 2),
-                'support_level': support_level,
-                'resistance_level': resistance_level,
-            }
-
-        return None
-
-    def _check_sr_entry(
-        self,
-        current_price: float,
-        support_levels: pd.DataFrame,
-        resistance_levels: pd.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Check for entry at S/R levels (existing LONG + SHORT logic).
-        Returns the first valid signal or None.
-        """
-        if support_levels.empty or resistance_levels.empty:
-            return None
-
-        # Try LONG at support first
-        long_signal = self._check_long_entry(
-            current_price, support_levels, resistance_levels
-        )
-        if long_signal:
-            return long_signal
-
-        # Try SHORT at resistance
-        short_signal = self._check_short_entry(
-            current_price, support_levels, resistance_levels
-        )
-        if short_signal:
-            return short_signal
-
-        return None
-
-    def _is_near_fib_zone(self, price: float) -> bool:
-        """
-        Check if a price is near any Fibonacci entry zone.
-        Used to suppress S/R signals that overlap with upcoming Fibonacci entries.
-        """
-        if self.fib_trade_setups.empty:
-            return False
-
-        for _, setup in self.fib_trade_setups.iterrows():
-            fib_entry = setup['entry_price']
-            proximity = abs(fib_entry - price) / max(fib_entry, price)
-            if proximity <= self.fib_sr_proximity:
-                return True
-
-        return False
-
-    # ─────────────────── S/R ENTRY LOGIC (preserved) ───────────────────
-
-    def _check_long_entry(
-        self,
-        current_price: float,
-        support_levels: pd.DataFrame,
-        resistance_levels: pd.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        """Check for LONG entry at support level."""
-        supports = support_levels.copy()
-        supports['distance'] = abs(supports['level_price'] - current_price)
-        supports = supports.sort_values(
-            ['importance', 'distance'], ascending=[False, True]
-        )
-
-        resistances = resistance_levels.sort_values('level_price', ascending=True)
-
-        for _, support in supports.iterrows():
-            support_price = support['level_price']
-            support_importance = support['importance']
-
-            # Check if price is at this support
-            tolerance = support_price * self.entry_threshold
-            if not (support_price - tolerance <= current_price <= support_price + tolerance):
-                continue
-
-            entry_price = current_price
-            stop_loss = self._calculate_long_sl(support_price)
-            risk_per_share = entry_price - stop_loss
-
-            if risk_per_share <= 0:
-                continue
-
-            # Find resistance that meets R:R
-            resistances_above = resistances[resistances['level_price'] > entry_price]
-
-            for _, resistance in resistances_above.iterrows():
-                target_resistance = resistance['level_price']
-                take_profit = self._calculate_long_tp(target_resistance)
-                reward_per_share = take_profit - entry_price
-
-                risk_reward = reward_per_share / risk_per_share
-
-                if risk_reward >= self.min_risk_reward:
-                    self.log_message(
-                        f"[{self.get_strategy_name()}] S/R LONG signal: "
-                        f"Support ${support_price:.2f} (imp={support_importance}), "
-                        f"Resistance ${target_resistance:.2f}, R:R={risk_reward:.2f}"
-                    )
-
-                    return {
-                        'trade_type': 'BUY',
-                        'entry_price': entry_price,
-                        'take_profit': round(take_profit, 2),
-                        'stop_loss': round(stop_loss, 2),
-                        'support_level': support_price,
-                        'resistance_level': target_resistance,
-                    }
-
-            # Fallback with fixed R:R
-            if not resistances_above.empty:
-                fallback_reward = risk_per_share * self.min_risk_reward
-                fallback_tp = entry_price + fallback_reward
-                nearest_resistance = resistances_above.iloc[0]['level_price']
-
-                return {
-                    'trade_type': 'BUY',
-                    'entry_price': entry_price,
-                    'take_profit': round(fallback_tp, 2),
-                    'stop_loss': round(stop_loss, 2),
-                    'support_level': support_price,
-                    'resistance_level': nearest_resistance,
-                }
-
-        return None
-
-    def _check_short_entry(
-        self,
-        current_price: float,
-        support_levels: pd.DataFrame,
-        resistance_levels: pd.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        """Check for SHORT entry at resistance level."""
-        resistances = resistance_levels.copy()
-        resistances['distance'] = abs(resistances['level_price'] - current_price)
-        resistances = resistances.sort_values(
-            ['importance', 'distance'], ascending=[False, True]
-        )
-
-        supports = support_levels.sort_values('level_price', ascending=False)
-
-        for _, resistance in resistances.iterrows():
-            resistance_price = resistance['level_price']
-            resistance_importance = resistance['importance']
-
-            # Check if price is at this resistance
-            tolerance = resistance_price * self.entry_threshold
-            if not (resistance_price - tolerance <= current_price <= resistance_price + tolerance):
-                continue
-
-            entry_price = current_price
-            stop_loss = self._calculate_short_sl(resistance_price)
-            risk_per_share = stop_loss - entry_price
-
-            if risk_per_share <= 0:
-                continue
-
-            # Find support that meets R:R
-            supports_below = supports[supports['level_price'] < entry_price]
-
-            for _, support in supports_below.iterrows():
-                target_support = support['level_price']
-                take_profit = self._calculate_short_tp(target_support)
-                reward_per_share = entry_price - take_profit
-
-                risk_reward = reward_per_share / risk_per_share
-
-                if risk_reward >= self.min_risk_reward:
-                    self.log_message(
-                        f"[{self.get_strategy_name()}] S/R SHORT signal: "
-                        f"Resistance ${resistance_price:.2f} "
-                        f"(imp={resistance_importance}), "
-                        f"Support ${target_support:.2f}, R:R={risk_reward:.2f}"
-                    )
-
-                    return {
-                        'trade_type': 'SELL',
-                        'entry_price': entry_price,
-                        'take_profit': round(take_profit, 2),
-                        'stop_loss': round(stop_loss, 2),
-                        'support_level': target_support,
-                        'resistance_level': resistance_price,
-                    }
-
-            # Fallback with fixed R:R
-            if not supports_below.empty:
-                fallback_reward = risk_per_share * self.min_risk_reward
-                fallback_tp = entry_price - fallback_reward
-                nearest_support = supports_below.iloc[0]['level_price']
-
-                return {
-                    'trade_type': 'SELL',
-                    'entry_price': entry_price,
-                    'take_profit': round(fallback_tp, 2),
-                    'stop_loss': round(stop_loss, 2),
-                    'support_level': nearest_support,
-                    'resistance_level': resistance_price,
-                }
-
-        return None
-
-    # ─────────────────── EXIT SIGNALS ───────────────────
-
-    def get_exit_signal(
-        self,
-        current_price: float,
-        position,
-        entry_support: float,
-        target_resistance: float
-    ) -> Optional[str]:
-        """
-        Manual exit check (backup for bracket orders).
-        Uses exit_threshold for tolerance matching.
-        Works for both Fibonacci and S/R originated trades.
-        """
-        trade = self.trade_tracker.get_trade(self.current_trade_id)
-        if trade is None:
-            return None
-
-        # Calculate tolerance zones
-        tp_tolerance = trade.take_profit * self.exit_threshold
-        sl_tolerance = trade.stop_loss * self.exit_threshold
-
-        if trade.trade_type == "BUY":
-            # LONG position — TP is above, SL is below
-            if current_price >= trade.take_profit - tp_tolerance:
-                return "TP"
-            if current_price <= trade.stop_loss + sl_tolerance:
-                return "SL"
-        else:
-            # SHORT position — TP is below, SL is above
-            if current_price <= trade.take_profit + tp_tolerance:
-                return "TP"
-            if current_price >= trade.stop_loss - sl_tolerance:
-                return "SL"
-
-        return None
-
-    # ─────────────────── TP/SL HELPERS (for S/R entries) ───────────────────
-
-    def _calculate_long_tp(self, resistance_price: float) -> float:
-        """Calculate LONG TP price (threshold% before resistance)."""
-        return resistance_price * (1 - self.tp_threshold)
-
-    def _calculate_long_sl(self, support_price: float) -> float:
-        """Calculate LONG SL price (threshold% below support)."""
-        return support_price * (1 - self.sl_threshold)
-
-    def _calculate_short_tp(self, support_price: float) -> float:
-        """Calculate SHORT TP price (threshold% above support)."""
-        return support_price * (1 + self.tp_threshold)
-
-    def _calculate_short_sl(self, resistance_price: float) -> float:
-        """Calculate SHORT SL price (threshold% above resistance)."""
-        return resistance_price * (1 + self.sl_threshold)
-
-    def _handle_entry(self, current_price: float):
-        """
-        Override to enforce correct Risk:Reward via Limit Orders and accurately
-        match Lumibot orders to Trade ID to fix mismatch logging bugs.
-        """
-        if self.support_levels is None or self.resistance_levels is None:
+        risk_per_share = abs(entry - stop_loss)
+        if risk_per_share <= 0:
             return
-        
-        signal = self.get_entry_signal(
-            current_price,
-            self.support_levels,
-            self.resistance_levels
-        )
-        if signal is None:
-            return
-            
-        trade_type = signal.get('trade_type', 'BUY')
-        entry_price = signal.get('entry_price', current_price)
-        take_profit = signal['take_profit']
-        stop_loss = signal['stop_loss']
-        support_level = signal['support_level']
-        resistance_level = signal['resistance_level']
-        
-        entry_level = support_level if trade_type == 'BUY' else resistance_level
-        if self._is_level_already_entered(entry_level, trade_type):
-            return
-            
-        # Optimize custom SL/TP through ATR volatility framework
-        side = "buy" if trade_type == 'BUY' else "sell"
-        ticker = self.parameters.get("Ticker", "SPY")
-        atr = self.get_atr(length=14)
-        risk_levels = self.optimize_sl_tp(
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            side=side,
-            atr=atr,
-            trading_style=self.parameters.get("TradingStyle", "day_trading"),
-            sl_multiplier=self.parameters.get("ATR_Multiplier", 1.5),
-        )
-        stop_loss = risk_levels.stop_loss
-        take_profit = risk_levels.take_profit
 
-        quantity = signal.get('quantity')
-        if quantity is None:
-            quantity = self.get_position_sizing(entry_price, stop_loss)
-            
-        if quantity <= 0:
+        portfolio_val = self.get_portfolio_value()
+        risk_budget = portfolio_val * float(self.parameters.get("RiskPct", 0.02))
+        qty = floor(risk_budget / risk_per_share)
+
+        max_affordable = floor((portfolio_val * 0.95) / max(0.01, entry))
+        qty = min(qty, max_affordable)
+
+        if qty < 1:
             return
-            
-        self._mark_level_entered(entry_level, trade_type)
-        self.entry_support = support_level
-        self.target_resistance = resistance_level
-        
-        trade_id = self.trade_tracker.open_trade(
-            date=self.get_datetime(),
-            entry_price=entry_price,
-            quantity=quantity,
-            take_profit=take_profit,
-            stop_loss=stop_loss,
-            support_level=support_level,
-            resistance_level=resistance_level,
-            trade_type=trade_type
-        )
-        self.current_trade_id = trade_id
-        
-        side = "buy" if trade_type == "BUY" else "sell_short"
+
         order = self.create_order(
-            asset=self.parameters["Ticker"],
-            quantity=quantity,
+            asset=symbol,
+            quantity=qty,
             side=side,
-            limit_price=entry_price,
-            take_profit_price=take_profit,
-            stop_loss_price=stop_loss,
+            limit_price=round(entry, 2),
+            order_class="bracket",
+            secondary_stop_price=round(stop_loss, 2),
+            secondary_limit_price=round(take_profit, 2),
+            time_in_force="gtc"
         )
         self.submit_order(order)
-        
-        if not hasattr(self, 'active_trade_map'):
-            self.active_trade_map = {}
-        self.active_trade_map[order.identifier] = trade_id
-        if getattr(order, 'child_orders', None):
-            for child in order.child_orders:
-                self.active_trade_map[child.identifier] = trade_id
+        self.active_order = order
+
+        self.pending_side = side
+        self.entry_price = round(entry, 2)
+        self.stop_loss = round(stop_loss, 2)
+        self.take_profit = round(take_profit, 2)
+        self.trade_setup_type = reason
+        self.state = "WAITING_FOR_FILL"
+
+        self.log_message(
+            f"[{ticker_str}] SUBMITTED {side.upper()} BRACKET ORDER ({reason}): "
+            f"Qty={qty} @ ${entry:.2f} | SL=${stop_loss:.2f} | TP=${take_profit:.2f}"
+        )
+
+    def _reset_to_idle(self):
+        """Purge pending state and cancel working entry orders."""
+        if self.active_order is not None and self.state == "WAITING_FOR_FILL":
+            try:
+                self.cancel_order(self.active_order)
+            except Exception:
+                pass
+        self.state = "IDLE"
+        self.active_order = None
+        self.pending_side = None
+        self.entry_price = None
+        self.stop_loss = None
+        self.take_profit = None
+        self.trade_setup_type = None
+
     def on_filled_order(self, position, order, price, quantity, multiplier):
-        """
-        Handle filled orders with perfect logging for Entry/Exit, TP, SL, and Fibonacci levels.
-        Fixes base class bug with SHORT trades missing/closing immediately.
-        """
-        if not hasattr(self, 'active_trade_map'):
-            self.active_trade_map = {}
+        """Handle execution fills and maintain trade records."""
+        ticker_str = self.parameters["Ticker"].symbol if hasattr(self.parameters["Ticker"], "symbol") else str(self.parameters["Ticker"])
 
-        # Safe extraction of the correct trade ID
-        mapped_trade_id = self.active_trade_map.get(order.identifier, self.current_trade_id)
-        trade = self.trade_tracker.get_trade(mapped_trade_id)
-        if not trade:
-            return
+        if self.state == "WAITING_FOR_FILL":
+            self.state = "IN_POSITION"
+            self.current_trade = {
+                "ticker": ticker_str,
+                "entry_time": str(self.get_datetime()),
+                "side": self.pending_side,
+                "entry_price": float(price),
+                "quantity": float(quantity),
+                "stop_loss": float(self.stop_loss) if self.stop_loss else None,
+                "take_profit": float(self.take_profit) if self.take_profit else None,
+                "reason": self.trade_setup_type,
+            }
+            self.log_message(f"[{ticker_str}] TRADE FILLED: In position {quantity} @ ${price:.2f}.")
 
-        is_entry = False
-        is_exit = False
-        
-        if trade.trade_type == "BUY":
-            if order.side == "buy":
-                is_entry = True
-            elif order.side == "sell":
-                is_exit = True
-        elif trade.trade_type == "SELL":
-            if order.side == "sell":
-                is_entry = True
-            elif order.side == "buy":
-                is_exit = True
-
-        current_time = self.get_datetime().strftime("%Y-%m-%d %H:%M")
-
-        if is_entry:
-            msg = (
-                f"\n{'='*60}\n"
-                f"[ENTRY {mapped_trade_id} FILLED] {current_time} | {trade.trade_type}\n"
-                f"   Asset:        {self.parameters['Ticker'].symbol}\n"
-                f"   Quantity:     {quantity} @ ${price:.2f}\n"
-                f"   Take Profit:  ${trade.take_profit:.2f}\n"
-                f"   Stop Loss:    ${trade.stop_loss:.2f}\n"
-                f"   Fib Levels:   Low ${trade.support_level:.2f} - High ${trade.resistance_level:.2f}\n"
-                f"{'='*60}\n"
-            )
-            print(msg)
-            self.log_message(msg)
-
-        elif is_exit:
-            exit_reason = self._determine_exit_reason(price, mapped_trade_id)
-            closed_trade = self.trade_tracker.close_trade(
-                trade_id=mapped_trade_id,
-                date=self.get_datetime(),
-                exit_price=price,
-                exit_reason=exit_reason
-            )
-            
-            pnl_str = f"+${closed_trade.pnl:.2f}" if closed_trade and closed_trade.pnl >= 0 else (f"-${abs(closed_trade.pnl):.2f}" if closed_trade else "$0.00")
-            icon = "[OK]" if (closed_trade and closed_trade.pnl > 0) else "[FAIL]"
-            
-            msg = (
-                f"\n{'='*60}\n"
-                f"{icon} [EXIT OF ENTRY {mapped_trade_id} FILLED] {current_time} | {trade.trade_type}\n"
-                f"   Reason:       {exit_reason}\n"
-                f"   Quantity:     {quantity} @ ${price:.2f}\n"
-                f"   Realized P&L: {pnl_str}\n"
-                f"   Take Profit:  ${trade.take_profit:.2f}\n"
-                f"   Stop Loss:    ${trade.stop_loss:.2f}\n"
-                f"{'='*60}\n"
-            )
-            print(msg)
-            self.log_message(msg)
-            
-            if mapped_trade_id == self.current_trade_id:
-                self.current_trade_id = None
-            self.entry_support = None
-            self.target_resistance = None
-
-    def _determine_exit_reason(self, exit_price: float, trade_id: int = None) -> str:
-        """Determine exit reason accurately for both LONG and SHORT."""
-        target_id = trade_id or self.current_trade_id
-        trade = self.trade_tracker.get_trade(target_id)
-        if trade:
-            if trade.trade_type == "BUY":
-                if exit_price >= trade.take_profit * 0.99:
-                    return "TP"
-                elif exit_price <= trade.stop_loss * 1.01:
-                    return "SL"
-            else: # SELL
-                if exit_price <= trade.take_profit * 1.01:
-                    return "TP"
-                elif exit_price >= trade.stop_loss * 0.99:
-                    return "SL"
-        return "MANUAL"
-
-
-def run_backtest(
-    ticker: str = "NVDA",
-    start_date: datetime = None,
-    end_date: datetime = None,
-    budget: float = 10000,
-    min_importance: int = 3,
-    min_risk_reward: float = 1.5,
-    save_files: bool = False
-):
-    """Run backtest of Multi-Timeframe Key Levels Strategy."""
-    if start_date is None:
-        start_date = datetime.now() - timedelta(days=60)
-    if end_date is None:
-        end_date = datetime.now()
-
-    print(f"Running Multi-TF Key Levels (v2) backtest for {ticker}")
-    print(f"Period: {start_date.date()} to {end_date.date()}")
-
-    # Fetch explicit Intraday data for Lumibot to ensure a 5-minute trading iteration!
-    print(f"Downloading 5-minute Intraday data for {ticker}...")
-    df = yf.download(ticker, start=start_date, end=end_date, interval="5m", progress=False)
-    
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-        
-    df.rename(columns={
-        "Open": "open", 
-        "High": "high", 
-        "Low": "low", 
-        "Close": "close", 
-        "Volume": "volume"
-    }, inplace=True)
-    
-    pandas_data = {Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK): df}
-    
-    MultiTimeframeKeyLevelsStrategy.backtest(
-        YahooDataBacktesting,
-        start_date,
-        end_date,
-        pandas_data=pandas_data, # Explicit inject of 5-m frequency
-        budget=budget,
-        parameters={
-            "Ticker": Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK),
-            "MIN_IMPORTANCE": min_importance,
-            "MIN_RISK_REWARD": min_risk_reward,
-            "SAVE_FILES": save_files,
-            "PLOT": True,
-        },
-        save_logfile=save_files,
-        save_tearsheet=save_files,
-        show_plot=False,
-        show_tearsheet=False,
-        save_stats_file=save_files
-    )
-
-
-if __name__ == "__main__":
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=14)
-    run_backtest(
-        ticker="NVDA",
-        start_date=start_dt,
-        end_date=end_dt,
-        budget=10000,
-        min_importance=2,
-        min_risk_reward=1.5,
-        save_files=True
-    )
-
+        elif self.state == "IN_POSITION":
+            if position is None or position.quantity == 0:
+                if self.current_trade:
+                    self.current_trade["exit_time"] = str(self.get_datetime())
+                    self.current_trade["exit_price"] = float(price)
+                    entry_p = self.current_trade["entry_price"]
+                    qty = self.current_trade["quantity"]
+                    side = self.current_trade["side"]
+                    pnl = (price - entry_p) * qty if side == "buy" else (entry_p - price) * qty
+                    self.current_trade["pnl"] = round(pnl, 2)
+                    self.current_trade["pnl_pct"] = round(
+                        ((price - entry_p) / entry_p) * 100 if side == "buy" else ((entry_p - price) / entry_p) * 100, 2
+                    )
+                    self.trade_records.append(self.current_trade)
+                    self.log_message(f"[{ticker_str}] POSITION CLOSED @ ${price:.2f} | PnL: ${pnl:.2f} ({self.current_trade['pnl_pct']}%)")
+                    self.current_trade = None
+                self._reset_to_idle()
