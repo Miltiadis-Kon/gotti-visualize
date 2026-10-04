@@ -27,15 +27,12 @@ Open-source reference: https://pypi.org/project/smartmoneyconcepts/
 
 from __future__ import annotations
 
-import os
 import sys
-import io
 import math
 from datetime import datetime, time
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any
 import pytz
 import pandas as pd
-import numpy as np
 
 # Ensure UTF-8 console output for Windows
 if hasattr(sys.stdout, "reconfigure"):

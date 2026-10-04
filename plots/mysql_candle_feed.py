@@ -8,7 +8,6 @@ Provides clean, structured Pandas DataFrames ready for Lumibot, Plotly, or Panda
 
 import os
 import logging
-from datetime import datetime
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import mysql.connector

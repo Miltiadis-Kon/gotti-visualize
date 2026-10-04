@@ -14,15 +14,10 @@ from __future__ import annotations
 
 import os
 import sys
-import math
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-import pandas as pd
-import numpy as np
-
 from lumibot.entities import Asset
-from lumibot.strategies.strategy import Strategy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -33,9 +28,9 @@ except ImportError:
     from strat_baseplate import StrategyBaseplate
 from smc_bias_model.bias_structure import M15BoxStructureDetector, BiasDirection, ExternalBoxRange
 from smc_bias_model.session_killzones import SessionKillzoneManager, LiquidationStatus
-from smc_bias_model.m1_choch import M1CHoCHDetector, M1CHoCHConfirmation
-from smc_bias_model.m5_poi import M5POISelector, PointOfInterest, POIType
-from smc_bias_model.bias_order_manager import BiasOrderManager, BiasTradeRecord, OrderLifecycleStatus
+from smc_bias_model.m1_choch import M1CHoCHDetector
+from smc_bias_model.m5_poi import M5POISelector
+from smc_bias_model.bias_order_manager import BiasOrderManager, BiasTradeRecord
 
 
 class SMCIntradayBiasStrategy(StrategyBaseplate):

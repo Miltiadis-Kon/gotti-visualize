@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import uuid
 from abc import abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from math import floor
 
 import pandas as pd
-import pandas_ta as ta
-from lumibot.strategies.strategy import Strategy
+import pandas_ta  # Registers .ta DataFrame accessor
 from lumibot.entities import Asset
 from strategies.strat_baseplate import StrategyBaseplate
 

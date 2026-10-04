@@ -4,7 +4,7 @@ Trade Tracker Module
 Tracks all trades during backtesting/live trading with full details for reporting and visualization.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import pandas as pd

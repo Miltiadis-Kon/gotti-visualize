@@ -18,7 +18,6 @@ from lumibot.entities import Asset
 
 from strategies import (
     StrategyBaseplate,
-    OpeningGap,
     LiquiditySweepStrategy,
     BaseKeyLevelsStrategy,
     MultiTimeframeKeyLevelsStrategy,
@@ -37,7 +36,6 @@ def test_package_exports_and_aliases():
     """Verify all standardized strategy classes and backward-compatible aliases are present."""
     assert SMCStrategy is SmartMoneyConceptsStrategy
     assert SMCBiasModelStrategy is SMCIntradayBiasStrategy
-    assert OpeningGap is StrategyBaseplate
     assert issubclass(BaseKeyLevelsStrategy, StrategyBaseplate)
     assert issubclass(MultiTimeframeKeyLevelsStrategy, StrategyBaseplate)
     assert issubclass(LiquiditySweepStrategy, StrategyBaseplate)

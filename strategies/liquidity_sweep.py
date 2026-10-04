@@ -43,10 +43,9 @@ from typing import Optional, Dict, Any, List, Tuple
 from math import floor
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+import pandas_ta  # Registers .ta DataFrame accessor
 
 from lumibot.entities import Asset
-from lumibot.strategies.strategy import Strategy
 
 try:
     from strategies.strat_baseplate import StrategyBaseplate

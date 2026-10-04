@@ -22,10 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.key_levels import (
     KeyLevels, 
-    TIMEFRAME_COLORS, 
-    TIMEFRAME_LOOKBACK,
-    TIMEFRAME_IMPORTANCE,
-    FIBONACCI_LEVELS,
     FIBONACCI_THRESHOLD,
     FIBONACCI_IMPORTANCE,
     PRICE_THRESHOLD

@@ -17,15 +17,13 @@ from __future__ import annotations
 import os
 import sys
 import math
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 import pandas as pd
-import numpy as np
-import pandas_ta as ta
+import pandas_ta  # Registers .ta DataFrame accessor
 
 from lumibot.entities import Asset
-from lumibot.strategies.strategy import Strategy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -40,18 +38,13 @@ from smc.smc_structure import (
     SwingPoint,
     SwingType,
     TrendBias,
-    detect_structure_shifts,
 )
 from smc.smc_fvg import (
     FairValueGap,
     FVGType,
     detect_fvgs,
-    filter_fvgs_by_equilibrium,
-    update_fvg_mitigation,
 )
 from smc.smc_liquidity import (
-    LiquidityPool,
-    LiquidityType,
     find_liquidity_pools,
     evaluate_3r_veto,
     extract_pdh_pdl,
@@ -59,7 +52,6 @@ from smc.smc_liquidity import (
 from smc.smc_tranche_manager import (
     SMCTrancheManager,
     SMCTradeLifecycle,
-    TrancheStatus,
 )
 
 

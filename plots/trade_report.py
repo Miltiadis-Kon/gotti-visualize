@@ -5,19 +5,12 @@ Functions for generating trade reports and statistics from backtest results.
 """
 
 import pandas as pd
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+from typing import List, Dict, Any
 import os
 import sys
 
-# Import Trade class
+# Set up module path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-try:
-    from strategies.trade_tracker import Trade, TradeTracker
-except ImportError:
-    Trade = None
-    TradeTracker = None
 
 
 def generate_trade_report(trades: List[Any]) -> pd.DataFrame:

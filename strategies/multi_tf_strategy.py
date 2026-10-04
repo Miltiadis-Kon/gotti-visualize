@@ -20,16 +20,13 @@ import os
 import sys
 from math import floor
 import datetime
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import pandas_ta  # Registers .ta DataFrame accessor
 
 from lumibot.entities import Asset
-from lumibot.backtesting import PandasDataBacktesting
 
 try:
     from strategies.strat_baseplate import StrategyBaseplate
@@ -37,7 +34,7 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from strat_baseplate import StrategyBaseplate
 from key_levels.key_levels import find_key_levels, merge_key_levels
-from key_levels.fibonacci_levels import get_fibonacci_trade_setups, find_fibonacci_levels
+from key_levels.fibonacci_levels import get_fibonacci_trade_setups
 
 
 class MultiTimeframeKeyLevelsStrategy(StrategyBaseplate):

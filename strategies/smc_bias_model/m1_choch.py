@@ -18,7 +18,7 @@ Rule 4 of the 5-Rule SMC Intraday Bias Model:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Any
 import pandas as pd
 import numpy as np
 

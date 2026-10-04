@@ -14,10 +14,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Dict, Any
 import pandas as pd
-import numpy as np
 
 from .smc_structure import SwingPoint, SwingType
-from .smc_fvg import FairValueGap, FVGType
+from .smc_fvg import FairValueGap
 
 
 class LiquidityType(str, Enum):

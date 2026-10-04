@@ -5,7 +5,7 @@ Creates a package namespace so modules under `strategies` can be
 imported using package-style imports (e.g. `from strategies.key_levels ...`).
 """
 
-from strategies.strat_baseplate import StrategyBaseplate, OpeningGap
+from strategies.strat_baseplate import StrategyBaseplate
 from strategies.liquidity_sweep import LiquiditySweepStrategy
 from strategies.base_key_levels_strategy import BaseKeyLevelsStrategy
 from strategies.multi_tf_strategy import MultiTimeframeKeyLevelsStrategy
@@ -22,7 +22,6 @@ from strategies.risk_management import (
 
 __all__ = [
     'StrategyBaseplate',
-    'OpeningGap',
     'LiquiditySweepStrategy',
     'BaseKeyLevelsStrategy',
     'MultiTimeframeKeyLevelsStrategy',

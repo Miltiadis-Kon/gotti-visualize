@@ -14,27 +14,21 @@ Child strategies should implement:
 - Strategy-specific parameters
 """
 
-from math import ceil
 from math import floor
 import pandas as pd
 import sys
 import os
 import json
 from abc import abstractmethod
-from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any
+from datetime import datetime
+from typing import Optional, Dict, Any
 
-from lumibot.strategies import Strategy
 from lumibot.entities import Asset
 
 # Add current directory to path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from key_levels import (
-    analyze,
-    RESOLUTION_IMPORTANCE,
-    DEFAULT_PRICE_THRESHOLD
-)
+from key_levels import analyze
 from strategies.strat_baseplate import StrategyBaseplate
 from trade_tracker import TradeTracker
 
@@ -304,16 +298,13 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
                 self.log_message(f"Error saving chart: {e}")
 
     # ──────────────────────────────────────────────────────────────────
-    # Parameter DB hook — wire up when ready
+    # Parameter DB hook
     # ──────────────────────────────────────────────────────────────────
 
-    # def before_market_opens(self):
-    #     """
-    #     Lumibot calls this ~20 minutes before each session opens.
-    #     Perfect place to refresh strategy parameters from the DB
-    #     so any changes made in the table take effect without a restart.
-    #     """
-    #     self._load_parameters_from_db()
+    def before_market_opens(self):
+        """Pre-market hook: refresh parameters from DB and run baseplate setup."""
+        self._load_parameters_from_db()
+        super().before_market_opens()
 
     def _load_parameters_from_db(self):
         """

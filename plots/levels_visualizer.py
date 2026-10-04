@@ -18,8 +18,6 @@ from datetime import datetime, timedelta
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strategies.key_levels import KeyLevels, TIMEFRAME_LOOKBACK
-
 
 # Page config
 st.set_page_config(

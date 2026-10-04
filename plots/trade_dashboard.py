@@ -15,7 +15,6 @@ Run with: streamlit run plots/trade_dashboard.py
 """
 
 import streamlit as st
-import plotly.graph_objects as go
 import pandas as pd
 import json
 import os
@@ -28,18 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from strategies.trade_tracker import Trade, TradeTracker
 from strategies.key_levels import (
     KeyLevels, 
-    TIMEFRAME_COLORS, 
-    TIMEFRAME_LOOKBACK,
-    TIMEFRAME_IMPORTANCE,
     PRICE_THRESHOLD
 )
 from plots.chart_builder import ChartBuilder
 from plots.renderers import get_renderer
-from plots.renderers.plotly_renderer import COLORS
 from plots.trade_report import (
     generate_trade_report,
-    calculate_statistics,
-    format_trade_for_display
+    calculate_statistics
 )
 
 

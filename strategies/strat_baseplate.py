@@ -1,19 +1,15 @@
 import sys
 import os
-from typing import Optional, Tuple, Dict, Any, Union
-import pandas_ta as ta
+from typing import Optional
 import pandas as pd
 from datetime import datetime, timedelta
-from lumibot.backtesting import YahooDataBacktesting
 from lumibot.strategies.strategy import Strategy
-from lumibot.brokers import Alpaca
 from lumibot.entities import Asset
-from lumibot.traders import Trader
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_mixin import PlottableStrategyMixin
-from risk_management import optimize_sl_tp, calculate_atr, calculate_trailing_stop, ATRRiskLevels, TRADING_STYLES
+from risk_management import optimize_sl_tp, calculate_atr, calculate_trailing_stop, ATRRiskLevels
 
 load_dotenv()
 
@@ -341,35 +337,3 @@ class StrategyBaseplate(Strategy, PlottableStrategyMixin):
             )
             self.save_plot_html(output_path)
         return super().on_strategy_end()
-
-
-# Backward-compatibility alias
-OpeningGap = StrategyBaseplate
-
-
-def run_live():
-    trader = Trader()
-    broker = Alpaca(ALPACA_CONFIG)
-    strategy = StrategyBaseplate(
-        broker=broker,
-        parameters={"Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK)},
-    )
-    trader.add_strategy(strategy)
-    trader.run_all()
-
-
-def run_backtest():
-    backtesting_start = datetime(2023, 10, 23)
-    backtesting_end = datetime(2024, 10, 23)
-    budget = 2000
-    StrategyBaseplate.backtest(
-        YahooDataBacktesting,
-        backtesting_start,
-        backtesting_end,
-        budget=budget,
-        parameters={"Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK)},
-    )
-
-
-if __name__ == "__main__":
-    run_backtest()

@@ -18,11 +18,11 @@ Usage:
 import os
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Tuple
+from typing import List, Dict, Tuple
 from dataclasses import dataclass
 
-from .key_levels import find_key_levels, merge_key_levels, KeyLevelDetector
-from .fibonacci_levels import find_fibonacci_levels, get_fibonacci_trade_setups, FibonacciDetector
+from .key_levels import merge_key_levels, KeyLevelDetector
+from .fibonacci_levels import FibonacciDetector
 
 
 # Resolution to interval mapping for data fetching
