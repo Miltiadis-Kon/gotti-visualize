@@ -309,26 +309,28 @@ def run_simulation_for_ticker(ticker: str) -> dict:
     print(f"  Simulating Liquidity Sweep on {ticker} (3-Month 5M)")
     print(f"=======================================================")
 
-    # 1. Fetch 5-Minute Historical Candles
+    # 1. Fetch 5-Minute Historical Candles (RTH Only: 09:30 to 16:00 EST)
     df_raw = candle_feed.get_candles_df(
         ticker,
         timeframe="5 min",
         start_date=DATA_START,
-        end_date=BACKTEST_END.strftime("%Y-%m-%d %H:%M:%S")
+        end_date=BACKTEST_END.strftime("%Y-%m-%d %H:%M:%S"),
+        rth_only=True
     )
 
     if df_raw.empty or len(df_raw) < 100:
         print(f"  [ERROR] Insufficient candles found for {ticker}")
         return {"ticker": ticker, "status": "ERROR"}
 
-    print(f"  Loaded {len(df_raw):,} 5-minute institutional candles.")
+    print(f"  Loaded {len(df_raw):,} 5-minute RTH institutional candles.")
 
-    # 2. Package for Lumibot
+    # 2. Package for Lumibot (RTH Only)
     pandas_data = candle_feed.create_lumibot_pandas_data(
         ticker,
         timeframe="5 min",
         start_date=DATA_START,
-        end_date=BACKTEST_END.strftime("%Y-%m-%d %H:%M:%S")
+        end_date=BACKTEST_END.strftime("%Y-%m-%d %H:%M:%S"),
+        rth_only=True
     )
 
     # 3. Run Lumibot Backtest
@@ -385,6 +387,209 @@ def run_simulation_for_ticker(ticker: str) -> dict:
     return metrics
 
 
+def generate_summary_dashboard(all_metrics: list, dashboard_path: str):
+    """Creates a unified institutional HTML dashboard linking all 4 ticker charts with metrics."""
+    os.makedirs(os.path.dirname(dashboard_path), exist_ok=True)
+    
+    rows_html = ""
+    for m in all_metrics:
+        if not m or "return_pct" not in m:
+            continue
+        ret_color = "#26a69a" if m["return_pct"] >= 0 else "#ef5350"
+        pnl_color = "#26a69a" if m["total_pnl"] >= 0 else "#ef5350"
+        wr_color = "#26a69a" if m["win_rate"] >= 50 else "#f39c12"
+        chart_name = f"{m['ticker']}_liquidity_sweep_5m.html"
+        rows_html += f"""
+        <tr>
+            <td style="font-weight: bold; font-size: 1.1em;"><a href="{chart_name}" target="chart_frame" onclick="switchChart('{chart_name}', '{m['ticker']}')" style="color: #29b6f6; text-decoration: none;">{m['ticker']}</a></td>
+            <td style="color: {ret_color}; font-weight: bold;">{m['return_pct']:+.2f}%</td>
+            <td style="color: #ef5350;">{m['max_dd']:.2f}%</td>
+            <td style="color: {wr_color}; font-weight: bold;">{m['win_rate']:.1f}% ({m['wins']}W / {m['losses']}L)</td>
+            <td>{m['trades']}</td>
+            <td style="color: {pnl_color}; font-weight: bold;">${m['total_pnl']:+,.2f}</td>
+            <td>${m['final_equity']:,.2f}</td>
+            <td><a href="{chart_name}" target="_blank" style="display: inline-block; padding: 4px 10px; background: #1e88e5; color: #fff; border-radius: 4px; text-decoration: none; font-size: 0.85em;">Open Chart ↗</a></td>
+        </tr>
+        """
+
+    first_ticker = all_metrics[0]["ticker"] if all_metrics else "NVDA"
+    first_chart = f"{first_ticker}_liquidity_sweep_5m.html"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Institutional Liquidity Sweep - US Equities Simulation</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #131722;
+            color: #d1d4dc;
+            margin: 0;
+            padding: 20px;
+        }}
+        .header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #2a2e39;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }}
+        h1 {{ margin: 0; font-size: 1.6em; color: #ffffff; }}
+        .badge {{ background: #26a69a22; border: 1px solid #26a69a; color: #26a69a; padding: 4px 10px; border-radius: 4px; font-size: 0.85em; }}
+        .enhancements {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }}
+        .card {{
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 8px;
+            padding: 15px;
+        }}
+        .card h4 {{ margin: 0 0 8px 0; color: #f39c12; font-size: 0.95em; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .card p {{ margin: 0; font-size: 0.85em; color: #9598a1; line-height: 1.4; }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            background: #1e222d;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #2a2e39;
+            margin-bottom: 25px;
+        }}
+        th, td {{
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #2a2e39;
+        }}
+        th {{
+            background-color: #2a2e39;
+            color: #d1d4dc;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        tr:hover {{ background-color: #252a36; }}
+        .chart-container {{
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 8px;
+            overflow: hidden;
+            padding: 15px;
+        }}
+        .chart-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }}
+        .btn-group button {{
+            background: #2a2e39;
+            border: 1px solid #363c4e;
+            color: #d1d4dc;
+            padding: 6px 14px;
+            margin-right: 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+        }}
+        .btn-group button.active {{
+            background: #1e88e5;
+            color: white;
+            border-color: #1e88e5;
+        }}
+        iframe {{
+            width: 100%;
+            height: 750px;
+            border: none;
+            border-radius: 6px;
+            background: #131722;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>Institutional Liquidity Sweep Strategy (US Equities Adapted)</h1>
+            <div style="color: #787b86; font-size: 0.9em; margin-top: 5px;">
+                5-Minute Candles | Simulation Window: 2026-06-15 to 2026-09-17 | Risk: 2% per trade + ATR Stop Buffer
+            </div>
+        </div>
+        <div class="badge">Institutional Framework Active</div>
+    </div>
+
+    <div class="enhancements">
+        <div class="card">
+            <h4>1. RTH Data Filtering</h4>
+            <p>Strictly 09:30:00 to 16:00:00 EST candles. Stripped out illiquid pre-market wicks and London Open artifacts.</p>
+        </div>
+        <div class="card">
+            <h4>2. 09:30 Anchored VWAP</h4>
+            <p>Fair value VWAP hard-anchored to the 09:30:00 opening bell print, preventing overnight gap distortion.</p>
+        </div>
+        <div class="card">
+            <h4>3. Opening Range Filter</h4>
+            <p>09:30-09:45 EST execution gate forms ORH/ORL. Active: 09:45-11:30 & 13:30-15:45. Dead Zone: 11:30-13:30.</p>
+        </div>
+        <div class="card">
+            <h4>4. Dynamic Gap Adjustment</h4>
+            <p>If Open > PDH: PDH dynamically converts to structural support (Long target). Symmetrical for Gap Downs.</p>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Ticker</th>
+                <th>Total Return</th>
+                <th>Max Drawdown</th>
+                <th>Win Rate</th>
+                <th>Trades</th>
+                <th>Net Strategy PnL</th>
+                <th>Final Equity</th>
+                <th>View Standalone</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows_html}
+        </tbody>
+    </table>
+
+    <div class="chart-container">
+        <div class="chart-header">
+            <h3 id="current-chart-title" style="margin: 0; color: #ffffff;">{first_ticker} 5-Minute Institutional Liquidity Chart</h3>
+            <div class="btn-group">
+                <button id="btn-NVDA" class="active" onclick="switchChart('NVDA_liquidity_sweep_5m.html', 'NVDA')">NVDA</button>
+                <button id="btn-PLTR" onclick="switchChart('PLTR_liquidity_sweep_5m.html', 'PLTR')">PLTR</button>
+                <button id="btn-MARA" onclick="switchChart('MARA_liquidity_sweep_5m.html', 'MARA')">MARA</button>
+                <button id="btn-GLD" onclick="switchChart('GLD_liquidity_sweep_5m.html', 'GLD')">GLD</button>
+            </div>
+        </div>
+        <iframe id="chart_frame" name="chart_frame" src="{first_chart}"></iframe>
+    </div>
+
+    <script>
+        function switchChart(url, ticker) {{
+            document.getElementById('chart_frame').src = url;
+            document.getElementById('current-chart-title').innerText = ticker + ' 5-Minute Institutional Liquidity Chart';
+            document.querySelectorAll('.btn-group button').forEach(b => b.classList.remove('active'));
+            var btn = document.getElementById('btn-' + ticker);
+            if (btn) btn.classList.add('active');
+        }}
+    </script>
+</body>
+</html>
+"""
+    with open(dashboard_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"  -> Saved unified dashboard to: {dashboard_path}")
+
+
 def main():
     print("=" * 65)
     print("  INSTITUTIONAL LIQUIDITY SWEEP: 3-MONTH MULTI-ASSET SIMULATION")
@@ -408,9 +613,13 @@ def main():
     print(f"{'Ticker':<8} | {'Return (%)':<12} | {'Max DD (%)':<12} | {'Win Rate (%)':<14} | {'Trades':<8} | {'Net PnL ($)':<12}")
     print("-" * 75)
     for m in all_metrics:
-        if "return_pct" in m:
+        if m and "return_pct" in m:
             print(f"{m['ticker']:<8} | {m['return_pct']:>+10.2f}% | {m['max_dd']:>10.2f}% | {m['win_rate']:>11.1f}% | {m['trades']:>6} | ${m['total_pnl']:>+10.2f}")
     print("=" * 75)
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    dashboard_file = os.path.join(repo_root, "logs", "charts", "liquidity_sweep_dashboard.html")
+    generate_summary_dashboard(all_metrics, dashboard_file)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,8 @@ class MySQLCandleFeed:
         timeframe: str = "5 min",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        rth_only: bool = False
     ) -> pd.DataFrame:
         """
         Retrieves historical candles for a ticker as an OHLCV DataFrame.
@@ -78,6 +79,7 @@ class MySQLCandleFeed:
             start_date: ISO date or datetime string (e.g. '2025-01-01').
             end_date: ISO date or datetime string.
             limit: Maximum candles to return (None for all).
+            rth_only: If True, restrict to Regular Trading Hours (09:30 - 16:00 EST).
 
         Returns:
             pd.DataFrame with columns: ['open', 'high', 'low', 'close', 'volume', 'vwap']
@@ -124,6 +126,12 @@ class MySQLCandleFeed:
                 if col in df.columns:
                     df[col] = df[col].astype(float)
 
+            if rth_only and not df.empty:
+                import datetime as dt_mod
+                ny_times = df.index.tz_convert("America/New_York")
+                rth_mask = (ny_times.time >= dt_mod.time(9, 30)) & (ny_times.time <= dt_mod.time(16, 0))
+                df = df[rth_mask]
+
             return df
 
         except Exception as e:
@@ -168,14 +176,15 @@ class MySQLCandleFeed:
         ticker: str,
         timeframe: str = "5 min",
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        rth_only: bool = False
     ) -> Dict[Any, Any]:
         """
         Creates a Lumibot-compatible pandas_data dictionary for PandasDataBacktesting.
         """
         from lumibot.entities import Asset, Data
 
-        df = self.get_candles_df(ticker, timeframe=timeframe, start_date=start_date, end_date=end_date)
+        df = self.get_candles_df(ticker, timeframe=timeframe, start_date=start_date, end_date=end_date, rth_only=rth_only)
         if df.empty:
             raise ValueError(f"No candles found for {ticker} with timeframe {timeframe}")
 

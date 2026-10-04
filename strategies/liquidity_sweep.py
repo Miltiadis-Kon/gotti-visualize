@@ -124,20 +124,35 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         atr_col = [c for c in data.columns if c.startswith("ATRr_")]
         data["atr"] = data[atr_col[0]] if atr_col else 1.0
 
-        # Session VWAP (resetting daily)
+        # Session VWAP (hard-anchored to 09:30:00 EST RTH open)
         data["typical_price"] = (data["high"] + data["low"] + data["close"]) / 3.0
         data["pv"] = data["typical_price"] * data["volume"]
 
         if isinstance(data.index, pd.DatetimeIndex):
-            session_dates = data.index.date
+            if data.index.tz is None:
+                idx_ny = data.index.tz_localize("UTC").tz_convert("America/New_York")
+            else:
+                idx_ny = data.index.tz_convert("America/New_York")
+            session_dates = idx_ny.date
+            times = idx_ny.time
         elif "datetime" in data.columns:
-            session_dates = pd.to_datetime(data["datetime"]).dt.date
+            dt_col = pd.to_datetime(data["datetime"])
+            if dt_col.dt.tz is None:
+                dt_col = dt_col.dt.tz_localize("UTC").dt.tz_convert("America/New_York")
+            else:
+                dt_col = dt_col.dt.tz_convert("America/New_York")
+            session_dates = dt_col.dt.date
+            times = dt_col.dt.time
         else:
             session_dates = np.zeros(len(data))
+            times = [datetime.time(9, 30)] * len(data)
 
         data["session_date"] = session_dates
-        data["cum_pv"] = data.groupby("session_date")["pv"].cumsum()
-        data["cum_vol"] = data.groupby("session_date")["volume"].cumsum()
+        # Hard-anchor VWAP to strictly 09:30:00 EST opening print
+        rth_pv = np.where(times >= datetime.time(9, 30), data["pv"], 0.0)
+        rth_vol = np.where(times >= datetime.time(9, 30), data["volume"], 0.0)
+        data["cum_pv"] = pd.Series(rth_pv, index=data.index).groupby(data["session_date"]).cumsum()
+        data["cum_vol"] = pd.Series(rth_vol, index=data.index).groupby(data["session_date"]).cumsum()
         data["vwap"] = data["cum_pv"] / data["cum_vol"].replace(0, np.nan)
         data["vwap"] = data["vwap"].ffill().bfill()
 
@@ -204,31 +219,38 @@ class LiquiditySweepStrategy(StrategyBaseplate):
         self, df: pd.DataFrame, current_dt: datetime.datetime
     ) -> Tuple[List[Tuple[float, str]], List[Tuple[float, str]]]:
         """
-        Evaluate time gates and map active targets:
-          - 03:00 - 05:00 EST: London Open (targets Asian Session 18:00 - 03:00)
-          - 09:30 - 11:30 EST: NYSE Open (targets Overnight 00:00 - 09:30 or PDH/PDL)
-          - 11:30 - 14:00 EST: Dead Zone (Halt & reset)
-          - 14:00 - 15:45 EST: EOD Cleanup (targets untouched session extremes)
+        US Equities Institutional Liquidity Targets & Time Gates:
+          - 09:30 - 09:45 EST: Opening Range Filter (No trading; establishes ORH & ORL)
+          - 09:45 - 11:30 EST: Morning Window (sweeps of ORH/ORL and gap-adjusted PDH/PDL)
+          - 11:30 - 13:30 EST: Dead Zone (Halt & reset; no execution)
+          - 13:30 - 15:45 EST: Afternoon Continuation (targets untouched morning liquidity & gap levels)
+          - > 15:45 EST: EOD Cutoff (No new trades)
         """
         current_time = current_dt.time()
 
-        # Dead Zone: London close + NY lunch (11:30 - 14:00 EST)
-        if datetime.time(11, 30) <= current_time < datetime.time(14, 0):
+        # 1. Opening Range Filter (09:30 - 09:45 EST) - No trades taken
+        if datetime.time(9, 30) <= current_time < datetime.time(9, 45):
             return [], []
 
-        # Check Active Windows
-        is_london = datetime.time(3, 0) <= current_time <= datetime.time(5, 0)
-        is_nyse = datetime.time(9, 30) <= current_time <= datetime.time(11, 30)
-        is_cleanup = datetime.time(14, 0) <= current_time <= datetime.time(15, 45)
+        # 2. Dead Zone (11:30 - 13:30 EST) - No execution
+        if datetime.time(11, 30) < current_time < datetime.time(13, 30):
+            return [], []
 
-        if not (is_london or is_nyse or is_cleanup):
+        # 3. Active Windows
+        is_morning = datetime.time(9, 45) <= current_time <= datetime.time(11, 30)
+        is_afternoon = datetime.time(13, 30) <= current_time <= datetime.time(15, 45)
+
+        if not (is_morning or is_afternoon):
             return [], []
 
         today = current_dt.date()
         today_bars = df[df["session_date"] == today]
         prior_bars = df[df["session_date"] < today]
 
-        # Accurate Previous Day High / Low from prior session
+        if today_bars.empty:
+            return [], []
+
+        # Previous Day High / Low from prior session
         prior_dates = prior_bars["session_date"].unique()
         if len(prior_dates) > 0:
             last_prior_date = prior_dates[-1]
@@ -239,35 +261,40 @@ class LiquiditySweepStrategy(StrategyBaseplate):
             pdh = float(df["high"].max())
             pdl = float(df["low"].min())
 
+        # Opening price of current regular session (09:30 bar)
+        session_open = float(today_bars.iloc[0]["open"])
+
         candidate_highs: List[Tuple[float, str]] = []
         candidate_lows: List[Tuple[float, str]] = []
 
-        if is_london:
-            # Asian Session (18:00 prior day to 03:00 today)
-            asian_bars = prior_bars[prior_bars.index.time >= datetime.time(18, 0)]
-            ash = float(asian_bars["high"].max()) if not asian_bars.empty else pdh
-            asl = float(asian_bars["low"].min()) if not asian_bars.empty else pdl
-            candidate_highs.append((ash, "Asian High"))
-            candidate_lows.append((asl, "Asian Low"))
+        # Improvement 4: Gap Adjustments for Liquidity Targets
+        # If Open > PDH: PDH is structural support below price -> Long Sweep Target
+        # If Open < PDL: PDL is structural resistance above price -> Short Sweep Target
+        # Else: Normal PDH resistance (Short) & PDL support (Long)
+        if session_open > pdh:
+            candidate_lows.append((pdh, "PDH Gap Support (Long Target)"))
+        elif session_open < pdl:
+            candidate_highs.append((pdl, "PDL Gap Resistance (Short Target)"))
+        else:
+            candidate_highs.append((pdh, "Previous Day High (Short Target)"))
+            candidate_lows.append((pdl, "Previous Day Low (Long Target)"))
 
-        elif is_nyse:
-            # Overnight session (00:00 to 09:30)
-            overnight_bars = today_bars[today_bars.index.time < datetime.time(9, 30)]
-            if not overnight_bars.empty:
-                onh = float(overnight_bars["high"].max())
-                onl = float(overnight_bars["low"].min())
-                candidate_highs.append((onh, "Overnight High"))
-                candidate_lows.append((onl, "Overnight Low"))
-            candidate_highs.append((pdh, "Previous Day High"))
-            candidate_lows.append((pdl, "Previous Day Low"))
+        # Opening Range Extremes (09:30 - 09:45 EST)
+        or_bars = today_bars[today_bars.index.time < datetime.time(9, 45)]
+        if not or_bars.empty:
+            orh = float(or_bars["high"].max())
+            orl = float(or_bars["low"].min())
+            candidate_highs.append((orh, "Opening Range High (ORH)"))
+            candidate_lows.append((orl, "Opening Range Low (ORL)"))
 
-        elif is_cleanup:
-            # Untouched session extremes before close
-            if not today_bars.empty:
-                candidate_highs.append((float(today_bars["high"].max()), "Session High"))
-                candidate_lows.append((float(today_bars["low"].min()), "Session Low"))
-            candidate_highs.append((pdh, "Previous Day High"))
-            candidate_lows.append((pdl, "Previous Day Low"))
+        if is_afternoon:
+            # Afternoon Window: Hunt for trend-continuation sweeps targeting untouched morning liquidity
+            morning_bars = today_bars[today_bars.index.time < datetime.time(13, 30)]
+            if not morning_bars.empty:
+                m_high = float(morning_bars["high"].max())
+                m_low = float(morning_bars["low"].min())
+                candidate_highs.append((m_high, "Morning Session High"))
+                candidate_lows.append((m_low, "Morning Session Low"))
 
         return candidate_highs, candidate_lows
 
