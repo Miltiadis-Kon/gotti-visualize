@@ -31,8 +31,11 @@ from plotly.subplots import make_subplots
 from lumibot.entities import Asset
 from lumibot.backtesting import PandasDataBacktesting
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from strat_baseplate import StrategyBaseplate
+try:
+    from strategies.strat_baseplate import StrategyBaseplate
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from strat_baseplate import StrategyBaseplate
 from key_levels.key_levels import find_key_levels, merge_key_levels
 from key_levels.fibonacci_levels import get_fibonacci_trade_setups, find_fibonacci_levels
 

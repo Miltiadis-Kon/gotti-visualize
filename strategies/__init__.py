@@ -7,6 +7,11 @@ imported using package-style imports (e.g. `from strategies.key_levels ...`).
 
 from strategies.strat_baseplate import StrategyBaseplate, OpeningGap
 from strategies.liquidity_sweep import LiquiditySweepStrategy
+from strategies.base_key_levels_strategy import BaseKeyLevelsStrategy
+from strategies.multi_tf_strategy import MultiTimeframeKeyLevelsStrategy
+from strategies.alpaca_smc_bridge import AlpacaSMCBridge
+from strategies.smc import SmartMoneyConceptsStrategy, SMCStrategy
+from strategies.smc_bias_model import SMCIntradayBiasStrategy, SMCBiasModelStrategy
 from strategies.risk_management import (
     optimize_sl_tp,
     calculate_atr,
@@ -19,6 +24,13 @@ __all__ = [
     'StrategyBaseplate',
     'OpeningGap',
     'LiquiditySweepStrategy',
+    'BaseKeyLevelsStrategy',
+    'MultiTimeframeKeyLevelsStrategy',
+    'AlpacaSMCBridge',
+    'SmartMoneyConceptsStrategy',
+    'SMCStrategy',
+    'SMCIntradayBiasStrategy',
+    'SMCBiasModelStrategy',
     'optimize_sl_tp',
     'calculate_atr',
     'calculate_trailing_stop',

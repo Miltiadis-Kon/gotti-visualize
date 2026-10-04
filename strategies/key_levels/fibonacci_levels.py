@@ -102,19 +102,32 @@ class FibonacciDetector:
         index_min, price_diff, trend, bar_index
         """
         swings = []
+        highs = df['high'].values
+        lows = df['low'].values
+        bc = self.backcandles
+        gc = self.gap_candles
+        n_rows = len(df)
         
-        for l in range(self.backcandles, len(df)):
-            # Get the range excluding recent gap candles
-            high_range = df['high'].iloc[l - self.backcandles:l - self.gap_candles]
-            low_range = df['low'].iloc[l - self.backcandles:l - self.gap_candles]
+        for l in range(bc, n_rows):
+            start_idx = l - bc
+            end_idx = l - gc
             
-            if len(high_range) == 0 or len(low_range) == 0:
+            if end_idx <= start_idx:
                 continue
             
-            max_price = high_range.max()
-            min_price = low_range.min()
-            index_max = high_range.idxmax()
-            index_min = low_range.idxmin()
+            w_high = highs[start_idx:end_idx]
+            w_low = lows[start_idx:end_idx]
+            
+            if len(w_high) == 0 or len(w_low) == 0:
+                continue
+            
+            rel_max = int(np.argmax(w_high))
+            rel_min = int(np.argmin(w_low))
+            
+            max_price = float(w_high[rel_max])
+            min_price = float(w_low[rel_min])
+            index_max = df.index[start_idx + rel_max]
+            index_min = df.index[start_idx + rel_min]
             price_diff = max_price - min_price
             
             # Determine trend direction based on which extreme came first

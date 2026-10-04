@@ -84,28 +84,57 @@ class KeyLevelDetector:
         if idx - n1 < 0 or idx + n2 >= len(df):
             return 0
         
-        pivot_low = True
-        pivot_high = True
+        lows = df['low'].values
+        highs = df['high'].values
+        target_low = lows[idx]
+        target_high = highs[idx]
         
-        for i in range(idx - n1, idx + n2 + 1):
-            if df['low'].iloc[idx] > df['low'].iloc[i]:
-                pivot_low = False
-            if df['high'].iloc[idx] < df['high'].iloc[i]:
-                pivot_high = False
+        w_low = lows[idx - n1 : idx + n2 + 1]
+        w_high = highs[idx - n1 : idx + n2 + 1]
         
-        if pivot_low and pivot_high:
+        p_low = bool(target_low <= np.min(w_low))
+        p_high = bool(target_high >= np.max(w_high))
+        
+        if p_low and p_high:
             return 3
-        elif pivot_low:
+        elif p_low:
             return 1
-        elif pivot_high:
+        elif p_high:
             return 2
         return 0
     
     def _detect_all_pivots(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Detect all pivot points in the data."""
+        """Detect all pivot points in the data with vectorized NumPy scanning."""
         df = df.copy()
         n = self.pivot_lookback
-        df['pivot'] = [self._detect_pivot(df, i, n, n) for i in range(len(df))]
+        n_rows = len(df)
+        pivots = np.zeros(n_rows, dtype=int)
+        
+        if n_rows < 2 * n + 1:
+            df['pivot'] = pivots
+            return df
+            
+        lows = df['low'].values
+        highs = df['high'].values
+        
+        for idx in range(n, n_rows - n):
+            target_low = lows[idx]
+            target_high = highs[idx]
+            
+            w_low = lows[idx - n : idx + n + 1]
+            w_high = highs[idx - n : idx + n + 1]
+            
+            p_low = bool(target_low <= np.min(w_low))
+            p_high = bool(target_high >= np.max(w_high))
+            
+            if p_low and p_high:
+                pivots[idx] = 3
+            elif p_low:
+                pivots[idx] = 1
+            elif p_high:
+                pivots[idx] = 2
+                
+        df['pivot'] = pivots
         return df
     
     def _cluster_levels(self, prices: List[float]) -> List[Tuple[float, int]]:

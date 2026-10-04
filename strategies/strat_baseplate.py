@@ -17,6 +17,12 @@ from risk_management import optimize_sl_tp, calculate_atr, calculate_trailing_st
 
 load_dotenv()
 
+# Ensure singleton module registration across both 'strategies.strat_baseplate' and 'strat_baseplate'
+if __name__ == "strategies.strat_baseplate" and "strat_baseplate" not in sys.modules:
+    sys.modules["strat_baseplate"] = sys.modules[__name__]
+elif __name__ == "strat_baseplate" and "strategies.strat_baseplate" not in sys.modules:
+    sys.modules["strategies.strat_baseplate"] = sys.modules[__name__]
+
 apikey = os.getenv("APCA_API_KEY_PAPER")
 apisecret = os.getenv("APCA_API_SECRET_KEY_PAPER")
 
@@ -54,7 +60,7 @@ class StrategyBaseplate(Strategy, PlottableStrategyMixin):
     def initialize(self):
         self.sleeptime = "5M"  # Execute strategy every 5 minutes by default
         self.will_plot = self.parameters.get("Plot", True)
-        self.risk_percent = 0.02  # 2% risk per trade
+        self.risk_percent = self.parameters.get("RiskPct", self.parameters.get("RISK_PERCENT", 0.02))
         self.current_trailing_stop = None
 
     def before_market_opens(self):
@@ -66,10 +72,12 @@ class StrategyBaseplate(Strategy, PlottableStrategyMixin):
                 self.ticker_bars = None
 
         self.tradeable = self.filter()
-        self.techincal = self.setup()
+        self.technical = self.setup()
+        self.techincal = self.technical  # Backwards compatibility alias
 
     def on_trading_iteration(self):
-        if getattr(self, "tradeable", False) and getattr(self, "techincal", False):
+        is_technical = getattr(self, "technical", False) or getattr(self, "techincal", False)
+        if getattr(self, "tradeable", False) and is_technical:
             entry_price = self.get_entry_price()
             position_size = self.get_position_sizing()
             if position_size and position_size != 0:

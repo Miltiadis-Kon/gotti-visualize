@@ -62,7 +62,8 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
     parameters = {
         **StrategyBaseplate.parameters,
         "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
-        "RISK_PERCENT": 0.02,      # Risk 2% of portfolio per trade
+        "RiskPct": 0.02,           # Standard risk naming (2% of portfolio per trade)
+        "RISK_PERCENT": 0.02,      # Backward-compatible alias
         "MIN_IMPORTANCE": 1,       # Minimum level importance to consider
         "TIMEFRAMES": ['1d', '4h', '1h', '15m'],  # Timeframes to analyze
         "RECALC_FREQUENCY": "daily",  # How often to recalculate: 'daily', 'weekly', 'once'
@@ -84,8 +85,8 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
         """
         self.sleeptime = "5M"  # Execute strategy every 5 minutes
         
-        # Load parameters
-        self.risk_percent = self.parameters.get("RISK_PERCENT", 0.02)
+        # Load parameters (support both RiskPct and legacy RISK_PERCENT)
+        self.risk_percent = self.parameters.get("RiskPct", self.parameters.get("RISK_PERCENT", 0.02))
         self.min_importance = self.parameters.get("MIN_IMPORTANCE", 1)
         self.timeframes = self.parameters.get("TIMEFRAMES", ['1d', '4h', '1h', '15m', '5m'])
         self.price_threshold = self.parameters.get("PRICE_THRESHOLD", 0.5)
@@ -380,7 +381,7 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
 
         if updated:
             # Refresh instance attributes that mirror self.parameters
-            self.risk_percent      = self.parameters.get("RISK_PERCENT", self.risk_percent)
+            self.risk_percent      = self.parameters.get("RiskPct", self.parameters.get("RISK_PERCENT", self.risk_percent))
             self.min_importance    = self.parameters.get("MIN_IMPORTANCE", self.min_importance)
             self.entry_threshold   = self.parameters.get("ENTRY_THRESHOLD", self.entry_threshold)
             self.exit_threshold    = self.parameters.get("EXIT_THRESHOLD", self.exit_threshold)
@@ -652,13 +653,18 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
         resolution_map = {'1d': '1D', '4h': '4H', '1h': '1H', '15m': '15m', '5m': '5m'}
         resolutions = [resolution_map.get(tf, tf) for tf in self.timeframes]
         
+        candle_data_input = {}
+        if getattr(self, "ticker_bars", None) is not None and not self.ticker_bars.empty:
+            candle_data_input['1D'] = self.ticker_bars
+
         # Fetch fresh levels via analyze()
         try:
             result = analyze(
                 ticker=ticker,
                 resolutions=resolutions,
                 use_alpaca=False,
-                as_of_date=as_of_datetime
+                as_of_date=as_of_datetime,
+                candle_data_input=candle_data_input if candle_data_input else None,
             )
             
             self.merged_levels = result.merged_levels

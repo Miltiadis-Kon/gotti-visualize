@@ -48,8 +48,11 @@ import pandas_ta as ta
 from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from strat_baseplate import StrategyBaseplate
+try:
+    from strategies.strat_baseplate import StrategyBaseplate
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from strat_baseplate import StrategyBaseplate
 
 
 class LiquiditySweepStrategy(StrategyBaseplate):

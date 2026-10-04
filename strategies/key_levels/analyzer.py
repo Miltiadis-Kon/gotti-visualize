@@ -18,7 +18,7 @@ Usage:
 import os
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass
 
 from .key_levels import find_key_levels, merge_key_levels, KeyLevelDetector
@@ -49,7 +49,9 @@ class AnalysisResult:
 class DataFetcher:
     """
     Fetches candlestick data from Yahoo Finance or Alpaca.
+    Includes in-memory cache to prevent redundant network requests during backtest iterations.
     """
+    _cache: Dict[Tuple[str, str], pd.DataFrame] = {}
     
     def __init__(self, use_alpaca: bool = True, as_of_date: datetime = None):
         """
@@ -84,6 +86,7 @@ class DataFetcher:
               days_back: int = 150) -> pd.DataFrame:
         """
         Fetch candlestick data for a ticker.
+        Checks in-memory cache before hitting external networks.
         
         Parameters:
         -----------
@@ -101,15 +104,84 @@ class DataFetcher:
         """
         end_date = self.as_of_date if self.as_of_date else datetime.now()
         start_date = end_date - timedelta(days=days_back)
+        cache_key = (ticker.upper(), interval.lower())
         
+        # 1. Check in-memory cache
+        if cache_key in self._cache:
+            cached_df = self._cache[cache_key]
+            if not cached_df.empty and 'date' in cached_df.columns:
+                try:
+                    c_min = cached_df['date'].min()
+                    c_max = cached_df['date'].max()
+                    s_ts = pd.to_datetime(start_date)
+                    e_ts = pd.to_datetime(end_date)
+                    if getattr(c_min, 'tzinfo', None) is not None:
+                        s_ts = s_ts.tz_localize(c_min.tzinfo) if s_ts.tzinfo is None else s_ts.tz_convert(c_min.tzinfo)
+                        e_ts = e_ts.tz_localize(c_min.tzinfo) if e_ts.tzinfo is None else e_ts.tz_convert(c_min.tzinfo)
+                    else:
+                        if s_ts.tzinfo is not None:
+                            s_ts = s_ts.tz_localize(None)
+                        if e_ts.tzinfo is not None:
+                            e_ts = e_ts.tz_localize(None)
+                            
+                    if c_min <= s_ts and c_max >= e_ts:
+                        mask = (cached_df['date'] >= s_ts) & (cached_df['date'] <= e_ts)
+                        sliced = cached_df.loc[mask].copy().reset_index(drop=True)
+                        if not sliced.empty:
+                            return sliced
+                except Exception:
+                    pass
+
+        # 2. Not fully in cache: fetch with forward buffer when in backtesting
+        fetch_start = start_date
+        fetch_end = end_date
+        if self.as_of_date:
+            now_dt = datetime.now()
+            buffered_end = min(now_dt, end_date + timedelta(days=180))
+            if buffered_end > fetch_end:
+                fetch_end = buffered_end
+
+        df = pd.DataFrame()
         # Try Alpaca first
         if self.alpaca_client:
-            df = self._fetch_alpaca(ticker, interval, start_date, end_date)
-            if not df.empty:
-                return df
+            df = self._fetch_alpaca(ticker, interval, fetch_start, fetch_end)
         
         # Fall back to Yahoo
-        return self._fetch_yahoo(ticker, interval, start_date, end_date)
+        if df.empty:
+            df = self._fetch_yahoo(ticker, interval, fetch_start, fetch_end)
+
+        if not df.empty and 'date' in df.columns:
+            # Update cache
+            if cache_key in self._cache and not self._cache[cache_key].empty:
+                merged = pd.concat([self._cache[cache_key], df], ignore_index=True)
+                merged.drop_duplicates(subset=['date'], inplace=True)
+                merged.sort_values('date', inplace=True)
+                self._cache[cache_key] = merged.reset_index(drop=True)
+            else:
+                self._cache[cache_key] = df.copy()
+
+            # Slice to requested window
+            try:
+                c_df = self._cache[cache_key]
+                c_min = c_df['date'].min()
+                s_ts = pd.to_datetime(start_date)
+                e_ts = pd.to_datetime(end_date)
+                if getattr(c_min, 'tzinfo', None) is not None:
+                    s_ts = s_ts.tz_localize(c_min.tzinfo) if s_ts.tzinfo is None else s_ts.tz_convert(c_min.tzinfo)
+                    e_ts = e_ts.tz_localize(c_min.tzinfo) if e_ts.tzinfo is None else e_ts.tz_convert(c_min.tzinfo)
+                else:
+                    if s_ts.tzinfo is not None:
+                        s_ts = s_ts.tz_localize(None)
+                    if e_ts.tzinfo is not None:
+                        e_ts = e_ts.tz_localize(None)
+                mask = (c_df['date'] >= s_ts) & (c_df['date'] <= e_ts)
+                sliced = c_df.loc[mask].copy().reset_index(drop=True)
+                if not sliced.empty:
+                    return sliced
+            except Exception:
+                pass
+
+        return df
     
     def _fetch_alpaca(self, ticker: str, interval: str, 
                       start_date: datetime, end_date: datetime) -> pd.DataFrame:
@@ -232,7 +304,8 @@ class KeyLevelAnalyzer:
     
     def analyze(self, ticker: str,
                 resolutions: List[str] = None,
-                days_back: Dict[str, int] = None) -> AnalysisResult:
+                days_back: Dict[str, int] = None,
+                candle_data_input: Dict[str, pd.DataFrame] = None) -> AnalysisResult:
         """
         Run full analysis on a ticker.
         
@@ -244,6 +317,8 @@ class KeyLevelAnalyzer:
             List of resolutions to analyze (default: ['1D', '4H', '1H', '15m', '5m'])
         days_back : Dict[str, int]
             Override days_back for each resolution
+        candle_data_input : Dict[str, pd.DataFrame]
+            Optional pre-loaded candle DataFrames keyed by resolution to bypass network fetching
             
         Returns:
         --------
@@ -273,8 +348,11 @@ class KeyLevelAnalyzer:
             
             print(f"\n--- {config['label']} ({resolution}) ---")
             
-            # Fetch data
-            df = self.data_fetcher.fetch(ticker, interval=interval, days_back=res_days_back)
+            # Fetch data or use pre-loaded candle data
+            if candle_data_input and resolution in candle_data_input and not candle_data_input[resolution].empty:
+                df = candle_data_input[resolution]
+            else:
+                df = self.data_fetcher.fetch(ticker, interval=interval, days_back=res_days_back)
             
             if df.empty:
                 print(f"  No data available")
@@ -370,7 +448,8 @@ def analyze(ticker: str,
             resolutions: List[str] = None,
             use_alpaca: bool = True,
             as_of_date: datetime = None,
-            days_back: Dict[str, int] = None) -> AnalysisResult:
+            days_back: Dict[str, int] = None,
+            candle_data_input: Dict[str, pd.DataFrame] = None) -> AnalysisResult:
     """
     Convenience function to run full analysis on a ticker.
     
@@ -386,6 +465,8 @@ def analyze(ticker: str,
         Analyze as of this date (for backtesting)
     days_back : Dict[str, int]
         Override days_back for each resolution
+    candle_data_input : Dict[str, pd.DataFrame]
+        Optional pre-loaded candle DataFrames keyed by resolution
         
     Returns:
     --------
@@ -399,7 +480,7 @@ def analyze(ticker: str,
     >>> print(result.trade_setups)
     """
     analyzer = KeyLevelAnalyzer(use_alpaca=use_alpaca, as_of_date=as_of_date)
-    return analyzer.analyze(ticker, resolutions=resolutions, days_back=days_back)
+    return analyzer.analyze(ticker, resolutions=resolutions, days_back=days_back, candle_data_input=candle_data_input)
 
 
 def quick_analyze(ticker: str, resolution: str = '1D', 
