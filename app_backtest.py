@@ -25,6 +25,22 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+# ── Signal Patch for Streamlit Threading ──────────────────────────────────────
+# Lumibot registers a SIGINT handler during backtesting, which raises a ValueError
+# when executed inside Streamlit's worker threads ("signal only works in main thread").
+import signal
+_orig_signal = signal.signal
+
+def _safe_signal(signalnum, handler):
+    if threading.current_thread() is threading.main_thread():
+        try:
+            return _orig_signal(signalnum, handler)
+        except Exception:
+            return None
+    return None
+
+signal.signal = _safe_signal
+
 # ── Lumibot progress bar silence ──────────────────────────────────────────────
 import lumibot.tools.helpers
 lumibot.tools.helpers.print_progress_bar = lambda *a, **k: None
