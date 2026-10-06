@@ -63,14 +63,6 @@ from .analyzer import (
     RESOLUTION_CONFIG
 )
 
-# Chart (Plotly visualization)
-from .chart import (
-    plot_analysis,
-    plot_ticker,
-    FIB_COLORS,
-    SR_COLORS,
-)
-
 __all__ = [
     # Key Levels
     'KeyLevelDetector',
@@ -97,12 +89,6 @@ __all__ = [
     'analyze',
     'quick_analyze',
     'RESOLUTION_CONFIG',
-    
-    # Chart
-    'plot_analysis',
-    'plot_ticker',
-    'FIB_COLORS',
-    'SR_COLORS',
 
     # v1 backward-compatibility
     'KeyLevels',
