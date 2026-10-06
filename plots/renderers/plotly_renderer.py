@@ -2,9 +2,7 @@
 Plotly Chart Renderer — Concrete Implementation (Template Method Pattern)
 
 Consolidates all Plotly visualization logic previously scattered across:
-  - plots/chart_utils.py
-  - plots/trade_dashboard.py  (lines 407-610)
-  - plots/key_levels_plot.py  (plot_key_levels_plotly)
+  - plots/trade_dashboard.py
   - strategies/book_based/*/  (inline schedule_plot / plot methods)
 
 This is the single source of truth for TradingView-dark-style Plotly charts.

@@ -15,10 +15,6 @@ New API (recommended)
     )
     fig = get_renderer("plotly").render(spec)
     fig.show()
-
-Legacy API (backward compatible, deprecated)
---------------------------------------------
-    from plots import plot_key_levels_lightweight, plot_key_levels_plotly, PLOT
 """
 
 # ── New plotting pipeline ────────────────────────────────────────────────────
@@ -33,14 +29,6 @@ from plots.plot_spec import (
 from plots.chart_builder import ChartBuilder
 from plots.renderers import get_renderer, BaseChartRenderer
 
-# ── Legacy API (kept for backward compatibility) ─────────────────────────────
-from plots.key_levels_plot import (
-    plot_key_levels_lightweight,
-    plot_key_levels_plotly,
-    set_plot_enabled,
-    PLOT,
-)
-
 __all__ = [
     # New API
     'PlotSpec',
@@ -52,9 +40,4 @@ __all__ = [
     'ChartBuilder',
     'get_renderer',
     'BaseChartRenderer',
-    # Legacy
-    'plot_key_levels_lightweight',
-    'plot_key_levels_plotly',
-    'set_plot_enabled',
-    'PLOT',
 ]
