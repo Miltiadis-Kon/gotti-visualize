@@ -9,6 +9,7 @@ from strategies.strat_baseplate import StrategyBaseplate
 from strategies.liquidity_sweep import LiquiditySweepStrategy
 from strategies.base_key_levels_strategy import BaseKeyLevelsStrategy
 from strategies.multi_tf_strategy import MultiTimeframeKeyLevelsStrategy
+from strategies.macd_strategy import MACDTradingStrategy
 from strategies.alpaca_smc_bridge import AlpacaSMCBridge
 from strategies.smc import SmartMoneyConceptsStrategy, SMCStrategy
 from strategies.smc_bias_model import SMCIntradayBiasStrategy, SMCBiasModelStrategy
@@ -25,6 +26,7 @@ __all__ = [
     'LiquiditySweepStrategy',
     'BaseKeyLevelsStrategy',
     'MultiTimeframeKeyLevelsStrategy',
+    'MACDTradingStrategy',
     'AlpacaSMCBridge',
     'SmartMoneyConceptsStrategy',
     'SMCStrategy',

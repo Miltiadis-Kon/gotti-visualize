@@ -91,17 +91,17 @@ class MACDTradingStrategy(BaseKeyLevelsStrategy):
         near_support = False
         closest_supp = current_price
         for _, row in support_levels.iterrows():
-            if abs(current_price - row['price']) / row['price'] <= self.entry_threshold:
+            if abs(current_price - row['level_price']) / row['level_price'] <= self.entry_threshold:
                 near_support = True
-                closest_supp = row['price']
+                closest_supp = row['level_price']
                 break
                 
         near_resistance = False
         closest_res = current_price
         for _, row in resistance_levels.iterrows():
-            if abs(current_price - row['price']) / row['price'] <= self.entry_threshold:
+            if abs(current_price - row['level_price']) / row['level_price'] <= self.entry_threshold:
                 near_resistance = True
-                closest_res = row['price']
+                closest_res = row['level_price']
                 break
 
         rr_ratio = self.parameters.get("RiskRewardRatio", 1.5)
@@ -110,10 +110,10 @@ class MACDTradingStrategy(BaseKeyLevelsStrategy):
         if current_price > ema_200 and near_support:
             # Bullish MACD cross strictly below zero line
             if macd_prev < macds_prev and macd_curr > macds_curr and macd_curr < 0:
-                # Stop Loss below 200 EMA
-                stop_loss = ema_200 * 0.999
+                # Stop Loss below 200 EMA or the tested support swing low
+                stop_loss = min(ema_200, closest_supp) * 0.999
                 
-                # If EMA is too far, risk might be huge. Ensure SL makes sense.
+                # If SL is above current price (impossible given current_price > ema_200 and near_support, but for safety)
                 if stop_loss >= current_price:
                     stop_loss = current_price * 0.99  # Fallback 1% stop loss
                     
@@ -133,8 +133,8 @@ class MACDTradingStrategy(BaseKeyLevelsStrategy):
         if current_price < ema_200 and near_resistance:
             # Bearish MACD cross strictly above zero line
             if macd_prev > macds_prev and macd_curr < macds_curr and macd_curr > 0:
-                # Stop Loss above 200 EMA
-                stop_loss = ema_200 * 1.001
+                # Stop Loss above 200 EMA or key resistance swing high
+                stop_loss = max(ema_200, closest_res) * 1.001
                 
                 if stop_loss <= current_price:
                     stop_loss = current_price * 1.01  # Fallback 1% stop loss

@@ -36,16 +36,15 @@ class SneakyPivotStrategy(Strategy, PlottableStrategyMixin):
     """
 
     parameters = {
-        "Ticker": Asset(symbol="NVDA", asset_type=Asset.AssetType.STOCK),
+        "Ticker": Asset(symbol="PLTR", asset_type=Asset.AssetType.STOCK),
         "Plot": True,
         
         "RiskPct": 0.02, # 2% risk per trade
-        "ProximityPct": 0.003, # 0.3% proximity to level to consider it 'tested'
+        "AtrMultiplier": 0.5, # Use 0.5 * ATR(14) for boundary testing tolerance
         "LookbackDays": 20, # Days to look back for swing highs/lows
     }
 
     def initialize(self):
-        # We need to assess 15m candles
         self.sleeptime = "15M"
         self.will_plot = self.parameters["Plot"]
         
@@ -53,34 +52,41 @@ class SneakyPivotStrategy(Strategy, PlottableStrategyMixin):
         self.rl = None
         self.sh = None
         self.sl = None
+        self.atr_val = None
         
         self.traded_today = False
 
     def before_market_opens(self):
         """
-        Calculate the 4 Magic Lines: RH, RL, SH, SL
+        Calculate the 4 Magic Lines + ATR
         """
         ticker = self.parameters["Ticker"]
         self.traded_today = False
         
-        # Fetch daily data for swing levels
         bars = self.get_historical_prices(ticker, self.parameters["LookbackDays"], "day")
-        if bars is None or len(bars.df) < 5:
+        if bars is None or len(bars.df) < 15:
             return
             
         df = bars.df.copy()
+        
+        # Calculate ATR for proximity buffer
+        import pandas_ta as ta
+        df.ta.atr(length=14, append=True)
+        atr_col = [c for c in df.columns if 'ATR' in c]
+        if atr_col:
+            self.atr_val = df[atr_col[0]].iloc[-1]
+        else:
+            self.atr_val = df['close'].iloc[-1] * 0.02 # fallback to 2%
+            
         yesterday = df.iloc[-1]
         
         # Range High & Low
         self.rh = yesterday['high']
         self.rl = yesterday['low']
         
-        # Find Swing High (most recent local maximum > RH)
-        # Find Swing Low (most recent local minimum < RL)
         self.sh = None
         self.sl = None
         
-        # Simple swing point detection over the lookback window (excluding yesterday)
         for i in range(len(df) - 2, 0, -1):
             curr_high = df['high'].iloc[i]
             prev_high = df['high'].iloc[i-1]
@@ -90,12 +96,10 @@ class SneakyPivotStrategy(Strategy, PlottableStrategyMixin):
             prev_low = df['low'].iloc[i-1]
             next_low = df['low'].iloc[i+1]
             
-            # Is it a swing high?
             if curr_high > prev_high and curr_high > next_high:
                 if self.sh is None and curr_high > self.rh:
                     self.sh = curr_high
                     
-            # Is it a swing low?
             if curr_low < prev_low and curr_low < next_low:
                 if self.sl is None and curr_low < self.rl:
                     self.sl = curr_low
@@ -103,37 +107,30 @@ class SneakyPivotStrategy(Strategy, PlottableStrategyMixin):
             if self.sh is not None and self.sl is not None:
                 break
                 
-        # Fallbacks if no swing high/low found
         if self.sh is None:
-            self.sh = self.rh * 1.05
+            self.sh = self.rh + self.atr_val
         if self.sl is None:
-            self.sl = self.rl * 0.95
+            self.sl = self.rl - self.atr_val
             
-        self.log_message(f"[{self.get_datetime().date()}] Levels | SH: {self.sh:.2f} | RH: {self.rh:.2f} || RL: {self.rl:.2f} | SL: {self.sl:.2f}")
+        self.log_message(f"[{self.get_datetime().date()}] Levels | SH: {self.sh:.2f} | RH: {self.rh:.2f} || RL: {self.rl:.2f} | SL: {self.sl:.2f} | ATR Buffer: {self.atr_val * self.parameters['AtrMultiplier']:.2f}")
 
     def on_trading_iteration(self):
         """
         Executes on 15m intervals.
-        We only look for entries exactly at 10:00 AM (market time).
-        Candle 1: 9:30 - 9:45
-        Candle 2: 9:45 - 10:00
-        At 10:00 AM, both are closed, we evaluate and place conditional orders.
+        Expanded entry window: scan for sneaky candles between 09:45 and 11:00.
         """
         current_time = self.get_datetime()
         
-        # Assuming market opens at 09:30 AM EST. 
-        # In Lumibot backtesting, timezones can vary, but typically starts at 09:30.
-        # Check if it is the 10:00 AM iteration.
         if self.traded_today:
             return
             
         ticker = self.parameters["Ticker"]
-        # Fetch last 30 minutes of 1-minute bars
-        bars = self.get_historical_prices(ticker, 30, "minute")
+        
+        # Fetch up to 120 minutes of 1-minute bars to safely resample the morning
+        bars = self.get_historical_prices(ticker, 120, "minute")
         if bars is None or len(bars.df) < 15:
             return
             
-        # Resample to 15-minute candles
         df_1m = bars.df.copy()
         df = df_1m.resample("15min").agg({
             "open": "first",
@@ -143,86 +140,79 @@ class SneakyPivotStrategy(Strategy, PlottableStrategyMixin):
             "volume": "sum"
         }).dropna()
         
-        # Verify these two bars are from today
-        if len(df) < 2 or df.index[-1].date() != current_time.date() or df.index[-2].date() != current_time.date():
+        if len(df) < 2:
             return
             
-        today_bars = df[df.index.date == current_time.date()]
-        if len(today_bars) != 2:
+        last_date = df.index[-1].date()
+        today_bars = df[df.index.date == last_date]
+            
+        # Expanded window: Evaluate between bar 2 (09:45) and bar 6 (11:00)
+        if len(today_bars) < 2 or len(today_bars) > 6:
             return
             
-        c1 = df.iloc[0] # 9:30 - 9:45
-        c2 = df.iloc[1] # 9:45 - 10:00
+        # First candle boundaries (Discretionary cheat)
+        c1 = today_bars.iloc[0]
+        c1_high = c1['high']
+        c1_low = c1['low']
         
-        self._evaluate_setups(c1, c2)
-        self.traded_today = True # Prevent multiple evaluations per day
+        # The latest closed candle is our potential "sneaky candle"
+        sneaky_c = today_bars.iloc[-1]
         
-    def _evaluate_setups(self, c1, c2):
-        if self.rh is None or self.rl is None:
+        self._evaluate_sneaky_candle(sneaky_c, c1_high, c1_low)
+        
+    def _evaluate_sneaky_candle(self, c, c1_high, c1_low):
+        if self.rh is None or self.rl is None or self.atr_val is None:
             return
             
-        proximity_pct = self.parameters["ProximityPct"]
+        buffer = self.atr_val * self.parameters["AtrMultiplier"]
         
-        # Helper to check if a level was tested
         def tested_level(low, high, level):
-            return low <= level * (1 + proximity_pct) and high >= level * (1 - proximity_pct)
-            
-        c1_low_tested_rl = tested_level(c1['low'], c1['high'], self.rl)
-        c1_low_tested_sl = tested_level(c1['low'], c1['high'], self.sl)
+            return low <= level + buffer and high >= level - buffer
+
+        # Check Bottom Lines (Buy Side Force)
+        tested_bottom = tested_level(c['low'], c['high'], self.rl) or \
+                        tested_level(c['low'], c['high'], self.sl) or \
+                        tested_level(c['low'], c['high'], c1_low)
+                        
+        # Check Top Lines (Sell Side Force)
+        tested_top = tested_level(c['low'], c['high'], self.rh) or \
+                     tested_level(c['low'], c['high'], self.sh) or \
+                     tested_level(c['low'], c['high'], c1_high)
         
-        c1_high_tested_rh = tested_level(c1['low'], c1['high'], self.rh)
-        c1_high_tested_sh = tested_level(c1['low'], c1['high'], self.sh)
-        
-        # ----------------------------------------------------
-        # LONG SETUP (Buying at Lows)
-        # ----------------------------------------------------
-        if c1_low_tested_rl or c1_low_tested_sl:
-            # Check Candle 2 (Sneaky Candle) stability
-            # Stabilizing: Green candle OR long lower wick
-            is_green = c2['close'] > c2['open']
-            body_size = abs(c2['close'] - c2['open'])
-            lower_wick = min(c2['close'], c2['open']) - c2['low']
+        # LONG SETUP
+        if tested_bottom:
+            is_green = c['close'] > c['open']
+            body_size = abs(c['close'] - c['open'])
+            lower_wick = min(c['close'], c['open']) - c['low']
             has_long_wick = lower_wick > body_size
             
             if is_green or has_long_wick:
-                self.log_message("LONG SETUP: Pushed into Buy Zone, Sneaky Candle printed.")
-                
-                # Stop Loss: Just below the tested support zone (low of C1 or C2)
-                sl_price = min(c1['low'], c2['low']) * 0.999
-                
-                # Take Profit: Target opposite side of range (RH)
-                tp_price = self.rh
-                
-                # Trigger Entry: Stop order exactly when price crosses above C2 high
-                entry_trigger = c2['high']
+                self.log_message("LONG SETUP: Sneaky Candle printed at support.")
+                sl_price = c['low'] * 0.999
+                # Target the opposite side of the range (C1 high or RH)
+                tp_price = max(self.rh, c1_high)
+                entry_trigger = c['high']
                 
                 self._place_trigger_order("buy", entry_trigger, sl_price, tp_price)
+                self.traded_today = True
                 return
 
-        # ----------------------------------------------------
-        # SHORT SETUP (Selling at Highs)
-        # ----------------------------------------------------
-        if c1_high_tested_rh or c1_high_tested_sh:
-            # Check Candle 2 (Sneaky Candle) stability
-            # Stabilizing: Red candle OR long upper wick
-            is_red = c2['close'] < c2['open']
-            body_size = abs(c2['close'] - c2['open'])
-            upper_wick = c2['high'] - max(c2['close'], c2['open'])
+        # SHORT SETUP
+        if tested_top:
+            is_red = c['close'] < c['open']
+            body_size = abs(c['close'] - c['open'])
+            upper_wick = c['high'] - max(c['close'], c['open'])
             has_long_wick = upper_wick > body_size
             
             if is_red or has_long_wick:
-                self.log_message("SHORT SETUP: Pushed into Sell Zone, Sneaky Candle printed.")
-                
-                # Stop Loss: Just above the tested resistance zone
-                sl_price = max(c1['high'], c2['high']) * 1.001
-                
-                # Take Profit: Target opposite side of range (RL)
-                tp_price = self.rl
-                
-                # Trigger Entry: Stop order exactly when price crosses below C2 low
-                entry_trigger = c2['low']
+                self.log_message("SHORT SETUP: Sneaky Candle printed at resistance.")
+                sl_price = c['high'] * 1.001
+                # Target the opposite side of the range
+                tp_price = min(self.rl, c1_low)
+                entry_trigger = c['low']
                 
                 self._place_trigger_order("sell", entry_trigger, sl_price, tp_price)
+                self.traded_today = True
                 return
 
     def _place_trigger_order(self, side: str, trigger_price: float, sl_price: float, tp_price: float):
