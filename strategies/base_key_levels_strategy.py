@@ -794,28 +794,15 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
             if start >= end:
                 end = start + _td(days=30)
 
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                df = yf.download(
-                    ticker,
-                    start=start.strftime("%Y-%m-%d"),
-                    end=end.strftime("%Y-%m-%d"),
-                    interval="1d",
-                    progress=False,
-                    auto_adjust=True,
-                )
+            days_diff = (end - start).days
+            days_diff = max(30, min(days_diff, 1000)) # Sane bounds for number of bars
 
-            if not df.empty:
-                import pandas as _pd
-                if isinstance(df.columns, _pd.MultiIndex):
-                    df.columns = df.columns.droplevel(1)
-                df.rename(
-                    columns={"Open": "open", "High": "high",
-                             "Low": "low", "Close": "close", "Volume": "volume"},
-                    inplace=True,
-                )
+            bars = self.get_historical_prices(self.parameters.get("Ticker"), days_diff, "day")
+            if bars is not None and hasattr(bars, "df") and not bars.df.empty:
+                df = bars.df.copy()
                 df.reset_index(inplace=True)
+                # Ensure columns are lowercase as expected by PlotlyRenderer
+                df.columns = [str(c).lower() if str(c).lower() in ["open", "high", "low", "close", "volume"] else c for c in df.columns]
                 layers.append(
                     CandlestickLayer(data=df, ticker=ticker, timeframe="1D")
                 )
