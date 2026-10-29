@@ -221,19 +221,24 @@ def simulate_strategy_engine(
                         }
                         break
 
-            # ── ENGINE B: NEWS + MULTI-TIMEFRAME KEY LEVELS & FIBONACCI ──────
+            # ── ENGINE B: NEWS + CATALYST IMPULSE FIBONACCI & MTF CONFLUENCE (CIGC) ─
             elif strategy_name == "News_MTF_KeyLevels":
                 open_time = bar0.name
                 prior_df = df[df.index < open_time]
-                if len(prior_df) < 20:
+                if len(prior_df) < 15:
                     continue
 
                 atr_val = calculate_atr(prior_df, length=14) or (open_price * 0.015)
-                atr_buf = atr_val * 1.0  # 1.0x 15m ATR buffer matching updated strategy
+                atr_buf = atr_val * 0.5  # 0.5x 15m ATR buffer beyond Fib/swing extreme
 
+                # MTF Key Levels & PDC/PDH/PDL
                 df_1d = prior_df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
                 df_1h = prior_df.resample("1h").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
                 df_15m = prior_df.resample("15min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+
+                pdc = float(df_1d.iloc[-1]["close"]) if not df_1d.empty else open_price
+                pdh = float(df_1d.iloc[-1]["high"]) if not df_1d.empty else open_price * 1.01
+                pdl = float(df_1d.iloc[-1]["low"]) if not df_1d.empty else open_price * 0.99
 
                 found_levels = []
                 for tf_code, r_df in [("1D", df_1d), ("1H", df_1h), ("15m", df_15m)]:
@@ -244,125 +249,186 @@ def simulate_strategy_engine(
 
                 merged_l = merge_key_levels(pd.concat(found_levels, ignore_index=True)) if found_levels else pd.DataFrame()
                 all_levels = np.sort(merged_l["level_price"].unique()) if not merged_l.empty else np.array([])
-                sups = merged_l[merged_l["type"] == "support"].sort_values("level_price", ascending=False) if not merged_l.empty else pd.DataFrame()
-                resists = merged_l[merged_l["type"] == "resistance"].sort_values("level_price", ascending=True) if not merged_l.empty else pd.DataFrame()
 
-                # Fibonacci setups across 1D, 1H, 15m
+                # Higher-timeframe macro Fibonacci swings
                 fib_list = []
-                for tf_label, r_df in [("1D", df_1d), ("1H", df_1h), ("15m", df_15m)]:
-                    if len(r_df) >= 15:
+                for tf_label, r_df in [("1D", df_1d), ("1H", df_1h)]:
+                    if len(r_df) >= 20:
                         s = get_fibonacci_trade_setups(r_df, resolution=tf_label, backcandles=min(35, len(r_df) - 2))
                         if not s.empty:
                             fib_list.append(s)
-                fib_setups = pd.concat(fib_list, ignore_index=True) if fib_list else pd.DataFrame()
+                htf_fib = pd.concat(fib_list, ignore_index=True) if fib_list else pd.DataFrame()
+
+                # Intraday Indicators: EMA9, EMA20, VWAP
+                ema9 = day_candles["close"].ewm(span=9, adjust=False).mean()
+                ema20 = day_candles["close"].ewm(span=20, adjust=False).mean()
+                typical_p = (day_candles["high"] + day_candles["low"] + day_candles["close"]) / 3.0
+                cum_pv = (typical_p * day_candles["volume"]).cumsum()
+                cum_vol = day_candles["volume"].cumsum()
+                vwap = (cum_pv / cum_vol.replace(0, np.nan)).ffill().bfill()
 
                 allowed_side = sig.signal_position
+                conf_tol = 0.006
+
+                def has_mtf_conf(px, v_val):
+                    if abs(px - v_val) / max(0.01, v_val) <= conf_tol:
+                        return True, "VWAP"
+                    if abs(px - pdh) / max(0.01, pdh) <= conf_tol:
+                        return True, "PDH_FLIP"
+                    if abs(px - pdl) / max(0.01, pdl) <= conf_tol:
+                        return True, "PDL_FLIP"
+                    if len(all_levels) > 0 and any(abs(px - kl) / max(0.01, kl) <= conf_tol for kl in all_levels):
+                        return True, "MTF_SR"
+                    return False, "NONE"
+
+                entry_setup = None
+                thesis_invalidated = False
+
                 for idx in range(1, len(day_candles)):
+                    if thesis_invalidated:
+                        break
+
                     bar = day_candles.iloc[idx]
                     prev_b = day_candles.iloc[idx - 1]
                     t = bar.name
                     p = float(bar["close"])
                     b_open = float(bar["open"])
+                    b_high = float(bar["high"])
+                    b_low = float(bar["low"])
                     prev_close = float(prev_b["close"])
+                    v = float(bar["volume"])
+                    avg_v = vol_ma.iloc[idx] if not np.isnan(vol_ma.iloc[idx]) else v
 
                     is_bullish = (p > b_open) and (p >= prev_close)
                     is_bearish = (p < b_open) and (p <= prev_close)
 
-                    # Opening Range boundary guard: never buy below or_low or short above or_high
-                    if allowed_side == "BUY" and or_low is not None and p < or_low:
+                    cur_vwap = float(vwap.iloc[idx])
+                    cur_ema9 = float(ema9.iloc[idx])
+                    cur_ema20 = float(ema20.iloc[idx])
+
+                    catalyst_bars = day_candles.iloc[:idx+1]
+                    if len(catalyst_bars) < 2:
                         continue
-                    if allowed_side == "SELL" and or_high is not None and p > or_high:
-                        continue
 
-                    v = float(bar["volume"])
-                    avg_v = vol_ma.iloc[idx] if not np.isnan(vol_ma.iloc[idx]) else v
-                    rvol = (v / avg_v) if avg_v > 0 else 1.3
+                    # LONG CATALYST FIBONACCI (BUY)
+                    if allowed_side == "BUY":
+                        peak_idx = catalyst_bars["high"].idxmax()
+                        bars_up_to_peak = catalyst_bars.loc[:peak_idx]
+                        bars_after_peak = catalyst_bars.loc[peak_idx:]
 
-                    entry_setup = None
+                        session_low_before_peak = float(bars_up_to_peak["low"].min())
+                        anchor_b = float(catalyst_bars.loc[peak_idx, "high"])
+                        anchor_a = max(pdc, session_low_before_peak - (1.0 * atr_val)) if session_low_before_peak > pdc else session_low_before_peak
 
-                    # Setup 1: MTF S/R Flip Breakout (RVOL >= 1.25)
-                    if len(all_levels) > 0 and rvol >= 1.25:
-                        if allowed_side == "BUY" and is_bullish:
-                            below = all_levels[all_levels <= p]
-                            above = all_levels[all_levels > p + (0.5 * atr_val)]
-                            if len(below) > 0:
-                                flipped = float(below[-1])
-                                if 0 <= (p - flipped) <= (flipped * 0.008):
-                                    sl = flipped - atr_buf
-                                    tp = float(above[0]) if len(above) > 0 else p + (2.5 * atr_val)
-                                    if (tp - p) / max(0.01, p - sl) >= 1.6:
-                                        entry_setup = ("BUY", p, sl, tp, "MTF_SR_FLIP_BREAKOUT")
-                        elif allowed_side == "SELL" and is_bearish:
-                            above = all_levels[all_levels >= p]
-                            below = all_levels[all_levels < p - (0.5 * atr_val)]
-                            if len(above) > 0:
-                                flipped = float(above[0])
-                                if 0 <= (flipped - p) <= (flipped * 0.008):
-                                    sl = flipped + atr_buf
-                                    tp = float(below[-1]) if len(below) > 0 else p - (2.5 * atr_val)
-                                    if (p - tp) / max(0.01, sl - p) >= 1.6:
-                                        entry_setup = ("SELL", p, sl, tp, "MTF_SR_FLIP_BREAKDOWN")
+                        impulse_size = anchor_b - anchor_a
+                        if impulse_size < (0.9 * atr_val):
+                            continue
 
-                    # Setup 2: Confirmed Fibonacci 0.618 Retracement
-                    if entry_setup is None and not fib_setups.empty:
-                        for _, f_row in fib_setups.iterrows():
-                            f_side = "BUY" if str(f_row["trend"]).lower() == "uptrend" else "SELL"
-                            if f_side != allowed_side:
-                                continue
-                            f_entry = float(f_row["entry_price"])
-                            if abs(p - f_entry) <= (f_entry * 0.006):
-                                if f_side == "BUY" and is_bullish and p >= f_entry:
-                                    raw_sl = min(float(f_row["stop_loss"]), p - atr_buf)
-                                    raw_tp = float(f_row["take_profit"])
-                                    if raw_tp > p and (raw_tp - p) / max(0.01, p - raw_sl) >= 1.6:
-                                        entry_setup = ("BUY", p, raw_sl, raw_tp, "FIB_0.618_CONFIRMED")
-                                        break
-                                elif f_side == "SELL" and is_bearish and p <= f_entry:
-                                    raw_sl = max(float(f_row["stop_loss"]), p + atr_buf)
-                                    raw_tp = float(f_row["take_profit"])
-                                    if raw_tp < p and (p - raw_tp) / max(0.01, raw_sl - p) >= 1.6:
-                                        entry_setup = ("SELL", p, raw_sl, raw_tp, "FIB_0.618_CONFIRMED")
-                                        break
+                        fib_236 = anchor_b - (0.236 * impulse_size)
+                        fib_382 = anchor_b - (0.382 * impulse_size)
+                        fib_500 = anchor_b - (0.500 * impulse_size)
+                        fib_618 = anchor_b - (0.618 * impulse_size)
+                        fib_786 = anchor_b - (0.786 * impulse_size)
+                        ext_1272 = anchor_b + (0.272 * impulse_size)
+                        ext_1618 = anchor_b + (0.618 * impulse_size)
 
-                    # Setup 3: Confirmed MTF Key Level Rejection
-                    if entry_setup is None:
-                        if allowed_side == "BUY" and not sups.empty and is_bullish:
-                            valid_sups = sups[sups["level_price"] <= p * 1.003]["level_price"].values
-                            valid_ress = resists[resists["level_price"] > p + atr_val]["level_price"].values
-                            for s_px in valid_sups:
-                                s_val = float(s_px)
-                                if abs(p - s_val) <= (s_val * 0.006) and p > s_val:
-                                    sl = s_val - atr_buf
-                                    tp = float(valid_ress[0]) if len(valid_ress) > 0 else p + (2.5 * atr_val)
-                                    if (tp - p) / max(0.01, p - sl) >= 1.6:
-                                        entry_setup = ("BUY", p, sl, tp, "MTF_SUPPORT_REJECTION")
-                                        break
-                        elif allowed_side == "SELL" and not resists.empty and is_bearish:
-                            valid_ress = resists[resists["level_price"] >= p * 0.997]["level_price"].values
-                            valid_sups = sups[sups["level_price"] < p - atr_val]["level_price"].values
-                            for r_px in valid_ress:
-                                r_val = float(r_px)
-                                if abs(p - r_val) <= (r_val * 0.006) and p < r_val:
-                                    sl = r_val + atr_buf
-                                    tp = float(valid_sups[-1]) if len(valid_sups) > 0 else p - (2.5 * atr_val)
-                                    if (p - tp) / max(0.01, sl - p) >= 1.6:
-                                        entry_setup = ("SELL", p, sl, tp, "MTF_RESISTANCE_REJECTION")
-                                        break
+                        pullback_low = float(bars_after_peak["low"].min()) if len(bars_after_peak) > 1 else b_low
+                        if pullback_low < fib_786 or p < fib_786:
+                            thesis_invalidated = True
+                            break
 
-                    if entry_setup is not None:
-                        e_side, e_p, e_sl, e_tp, e_reason = entry_setup
-                        risk_per_share = abs(e_p - e_sl)
-                        qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
+                        impulse_avg_vol = float(bars_up_to_peak["volume"].mean())
+                        healthy_vol = (v <= impulse_avg_vol * 1.35) or is_bullish
 
-                        active_positions[ticker] = {
-                            "ticker": ticker, "position": e_side, "entry_date": d_str,
-                            "entry_time": t, "entry_price": e_p, "quantity": qty,
-                            "stop_loss": e_sl, "take_profit": e_tp, "current_price": e_p,
-                            "selector_id": 1, "initial_risk": risk_per_share, "breakeven_ratchet": False,
-                            "be_trigger_r": 1.2
-                        }
-                        break
+                        if len(bars_after_peak) >= 2 and is_bullish and healthy_vol:
+                            # Tier 1: 0.382 - 0.500 Shallow Reload
+                            tested_shallow = (fib_500 * 0.998 <= pullback_low <= fib_236 * 1.001)
+                            in_window = (fib_500 <= p <= anchor_b)
+                            if tested_shallow and in_window and (p >= cur_vwap or p >= cur_ema20):
+                                sl = min(pullback_low, fib_618) - atr_buf
+                                tp = ext_1272 if (ext_1272 - p) / max(0.01, p - sl) >= 1.6 else ext_1618
+                                if (tp - p) / max(0.01, p - sl) >= 1.6:
+                                    entry_setup = ("BUY", p, sl, tp, anchor_b, "CIGC_TIER1_FIB_0.382_RELOAD")
+                                    break
+
+                            # Tier 2: 0.500 - 0.618 Golden Pocket + MTF/VWAP Confluence
+                            tested_pocket = (fib_786 < pullback_low <= fib_500 * 1.002)
+                            reclaimed_pocket = (fib_618 <= p <= fib_236) and (p >= cur_ema9)
+                            has_conf, conf_tag = has_mtf_conf(fib_618, cur_vwap)
+                            if tested_pocket and reclaimed_pocket and (has_conf or sig.selector_id == 1):
+                                sl = min(pullback_low, fib_786) - atr_buf
+                                tp = ext_1272 if (ext_1272 - p) / max(0.01, p - sl) >= 1.6 else ext_1618
+                                if (tp - p) / max(0.01, p - sl) >= 1.6:
+                                    entry_setup = ("BUY", p, sl, tp, anchor_b, f"CIGC_TIER2_GOLDEN_POCKET_{conf_tag}")
+                                    break
+
+                    # SHORT CATALYST FIBONACCI (SELL)
+                    elif allowed_side == "SELL":
+                        trough_idx = catalyst_bars["low"].idxmin()
+                        bars_down_to_trough = catalyst_bars.loc[:trough_idx]
+                        bars_after_trough = catalyst_bars.loc[trough_idx:]
+
+                        session_high_before_trough = float(bars_down_to_trough["high"].max())
+                        anchor_b = float(catalyst_bars.loc[trough_idx, "low"])
+                        anchor_a = min(pdc, session_high_before_trough + (1.0 * atr_val)) if session_high_before_trough < pdc else session_high_before_trough
+
+                        impulse_size = anchor_a - anchor_b
+                        if impulse_size < (0.9 * atr_val):
+                            continue
+
+                        fib_236 = anchor_b + (0.236 * impulse_size)
+                        fib_382 = anchor_b + (0.382 * impulse_size)
+                        fib_500 = anchor_b + (0.500 * impulse_size)
+                        fib_618 = anchor_b + (0.618 * impulse_size)
+                        fib_786 = anchor_b + (0.786 * impulse_size)
+                        ext_1272 = anchor_b - (0.272 * impulse_size)
+                        ext_1618 = anchor_b - (0.618 * impulse_size)
+
+                        pullback_high = float(bars_after_trough["high"].max()) if len(bars_after_trough) > 1 else b_high
+                        if pullback_high > fib_786 or p > fib_786:
+                            thesis_invalidated = True
+                            break
+
+                        impulse_avg_vol = float(bars_down_to_trough["volume"].mean())
+                        healthy_vol = (v <= impulse_avg_vol * 1.35) or is_bearish
+
+                        if len(bars_after_trough) >= 2 and is_bearish and healthy_vol:
+                            # Tier 1: 0.382 - 0.500 Shallow Bearish Reload
+                            tested_shallow = (fib_236 * 0.999 <= pullback_high <= fib_500 * 1.002)
+                            in_window = (anchor_b <= p <= fib_500)
+                            if tested_shallow and in_window and (p <= cur_vwap or p <= cur_ema20):
+                                sl = max(pullback_high, fib_618) + atr_buf
+                                tp = ext_1272 if (p - ext_1272) / max(0.01, sl - p) >= 1.6 else ext_1618
+                                if (p - tp) / max(0.01, sl - p) >= 1.6:
+                                    entry_setup = ("SELL", p, sl, tp, anchor_b, "CIGC_TIER1_SHORT_FIB_0.382")
+                                    break
+
+                            # Tier 2: 0.500 - 0.618 Bearish Golden Pocket
+                            tested_pocket = (fib_500 * 0.998 <= pullback_high < fib_786)
+                            reclaimed_pocket = (fib_236 <= p <= fib_618) and (p <= cur_ema9)
+                            has_conf, conf_tag = has_mtf_conf(fib_618, cur_vwap)
+                            if tested_pocket and reclaimed_pocket and (has_conf or sig.selector_id == 1):
+                                sl = max(pullback_high, fib_786) + atr_buf
+                                tp = ext_1272 if (p - ext_1272) / max(0.01, sl - p) >= 1.6 else ext_1618
+                                if (p - tp) / max(0.01, sl - p) >= 1.6:
+                                    entry_setup = ("SELL", p, sl, tp, anchor_b, f"CIGC_TIER2_SHORT_GOLDEN_POCKET_{conf_tag}")
+                                    break
+
+                if entry_setup is not None:
+                    e_side, e_p, e_sl, e_tp, e_peak, e_reason = entry_setup
+                    risk_per_share = abs(e_p - e_sl)
+                    qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
+                    qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
+
+                    active_positions[ticker] = {
+                        "ticker": ticker, "position": e_side, "entry_date": d_str,
+                        "entry_time": t, "entry_price": e_p, "quantity": qty,
+                        "stop_loss": e_sl, "take_profit": e_tp, "current_price": e_p,
+                        "selector_id": sig.selector_id, "initial_risk": risk_per_share,
+                        "breakeven_ratchet": False, "impulse_peak": e_peak,
+                        "be_trigger_r": 1.1
+                    }
+                    break
 
             # ── ENGINE C: NEWS + LIQUIDITY SWEEP (MULTI-POOL INSTITUTIONAL ENGINE) ─
             elif strategy_name == "News_LiquiditySweep":
@@ -460,13 +526,22 @@ def simulate_strategy_engine(
                 pos["current_price"] = c
                 b_time = bar.name.time()
 
-                # Breakeven Stop Ratchet (+1.2R for MTF/Sweep, +1.5R for Selector 1)
-                be_r = pos.get("be_trigger_r", 1.5)
+                # Breakeven / Wave-3 Ratchet (+0.2R for CIGC Fib, Breakeven for Selector 1 / Sweep)
                 if not pos.get("breakeven_ratchet", False):
+                    peak = pos.get("impulse_peak")
+                    reached_peak = (
+                        peak is not None and (
+                            (pos["position"] == "BUY" and c >= peak) or
+                            (pos["position"] == "SELL" and c <= peak)
+                        )
+                    )
                     signed_gain = (c - pos["entry_price"]) if pos["position"] == "BUY" else (pos["entry_price"] - c)
                     r_mult = signed_gain / pos["initial_risk"] if pos["initial_risk"] > 0 else 0.0
-                    if r_mult >= be_r:
-                        pos["stop_loss"] = pos["entry_price"]
+                    be_r = pos.get("be_trigger_r", 1.2)
+
+                    if reached_peak or r_mult >= be_r:
+                        cushion = (0.20 * pos["initial_risk"]) if peak is not None else 0.0
+                        pos["stop_loss"] = (pos["entry_price"] + cushion) if pos["position"] == "BUY" else (pos["entry_price"] - cushion)
                         pos["breakeven_ratchet"] = True
 
                 # Selector 2: Strict Intraday Flatten at 15:55 EST (15:45 bar close) on entry date
@@ -597,8 +672,18 @@ def simulate_strategy_engine(
     }
 
 
-def run_comparative_backtest(period_mode: str = "2months"):
+def run_comparative_backtest(period_mode: str = "6months"):
     periods = []
+    if period_mode in ("6months", "6month", "all"):
+        six_month_dates = [
+            "2026-08-29", "2026-09-11", "2026-09-14", "2026-09-15",
+            "2026-09-17", "2026-09-18", "2026-09-20", "2026-09-22",
+            "2026-09-23", "2026-09-29", "2026-09-30", "2026-10-01",
+            "2026-10-03", "2026-10-13", "2026-10-14", "2026-10-15",
+            "2026-10-16", "2026-10-19", "2026-10-20", "2026-10-28",
+            "2026-10-29"
+        ]
+        periods.append(("Full 6-Month Evaluation (Apr 29 - Oct 29, 2026)", six_month_dates, 8))
     if period_mode in ("2months", "2month", "all"):
         two_month_dates = [
             "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-17",
@@ -764,12 +849,33 @@ def run_comparative_backtest(period_mode: str = "2months"):
                     b_pnl = initial_portfolio * b_ret
                     benchmarks.append({
                         "symbol": b_sym,
-                        "name": b_name,
+                        "name": f"{b_name} [Active Window]",
                         "start_price": s_price,
                         "end_price": e_price,
                         "return_pct": b_ret,
                         "pnl": b_pnl
                     })
+
+        # Add Full 6-Month Macro Benchmark (April 29 - October 29) if evaluating 6-month period
+        if "6-Month" in period_title or period_mode in ("6months", "6month"):
+            try:
+                macro_df = yf.download(["SPY", "QQQ"], start="2026-04-29", end="2026-10-30", interval="1d", progress=False)
+                for b_sym, b_name in [("SPY", "SPY (S&P 500 ETF)"), ("QQQ", "NASDAQ 100 (QQQ ETF)")]:
+                    if "Open" in macro_df and b_sym in macro_df["Open"]:
+                        m_open = float(macro_df["Open"][b_sym].dropna().iloc[0])
+                        m_close = float(macro_df["Close"][b_sym].dropna().iloc[-1])
+                        m_ret = (m_close - m_open) / m_open
+                        m_pnl = initial_portfolio * m_ret
+                        benchmarks.append({
+                            "symbol": f"{b_sym}_6M",
+                            "name": f"{b_name} [Full 6-Month Macro]",
+                            "start_price": m_open,
+                            "end_price": m_close,
+                            "return_pct": m_ret,
+                            "pnl": m_pnl
+                        })
+            except Exception as e:
+                print(f"Macro benchmark download notice: {e}")
 
         # Format side-by-side performance table
         print("\n" + "=" * 115)
@@ -810,10 +916,10 @@ def run_comparative_backtest(period_mode: str = "2months"):
 
         # Alpha Outperformance Summary
         if benchmarks:
-            spy_b = next((b for b in benchmarks if b["symbol"] == "SPY"), None)
-            qqq_b = next((b for b in benchmarks if b["symbol"] == "QQQ"), None)
+            spy_b = next((b for b in benchmarks if b["symbol"] in ("SPY_6M", "SPY")), None)
+            qqq_b = next((b for b in benchmarks if b["symbol"] in ("QQQ_6M", "QQQ")), None)
             print("\n" + "-" * 115)
-            print(" OUTPERFORMANCE (ALPHA) RELATIVE TO $100K BENCHMARKS:")
+            print(f" OUTPERFORMANCE (ALPHA) RELATIVE TO $100K BENCHMARKS ({spy_b['name'] if spy_b else 'SPY'} & {qqq_b['name'] if qqq_b else 'QQQ'}):")
             print("-" * 115)
             for r in results:
                 strat_ret = r["return_pct"]
@@ -832,5 +938,5 @@ def run_comparative_backtest(period_mode: str = "2months"):
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "2months"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "6months"
     run_comparative_backtest(period_mode=mode)
