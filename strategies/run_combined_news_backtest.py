@@ -364,7 +364,7 @@ def simulate_strategy_engine(
                         }
                         break
 
-            # ── ENGINE C: NEWS + LIQUIDITY SWEEP (MULTI-POOL ENGINE) ────────
+            # ── ENGINE C: NEWS + LIQUIDITY SWEEP (MULTI-POOL INSTITUTIONAL ENGINE) ─
             elif strategy_name == "News_LiquiditySweep":
                 open_time = bar0.name
                 prior_dates = sorted(list(set(df[df.index.date < curr_date].index.date)))
@@ -384,50 +384,153 @@ def simulate_strategy_engine(
 
                 allowed_side = sig.signal_position
 
-                # Multi-pool levels: Pool 1 (ORB Extreme), Pool 2 (PDC), Pool 3 (PDH/PDL)
-                target_pools = [pdl, pdc, or_low] if allowed_side == "BUY" else [pdh, pdc, or_high]
+                # Candidate pools matching news_liquidity_sweep.py:
+                # BUY: OR_LOW, PDL, PDC (Gap Fill), PDH (Breakout Retest Flip)
+                # SELL: OR_HIGH, PDH, PDC (Gap Fill), PDL (Breakdown Retest Flip)
+                raw_pools = [
+                    ("OR_LOW", or_low), ("PDL", pdl), ("PDC_GAP", pdc), ("PDH_FLIP", pdh)
+                ] if allowed_side == "BUY" else [
+                    ("OR_HIGH", or_high), ("PDH", pdh), ("PDC_GAP", pdc), ("PDL_FLIP", pdl)
+                ]
+
+                # Deduplicate levels within 0.15%
+                target_pools = []
+                for p_name, p_lvl in raw_pools:
+                    if p_lvl is not None and not any(abs(p_lvl - ex_lvl) / max(0.01, ex_lvl) < 0.0015 for _, ex_lvl in target_pools):
+                        target_pools.append((p_name, p_lvl))
+
+                # Track multi-bar sweep state machine across day_candles
+                swp_state = "IDLE"
+                swp_lvl = None
+                swp_name = ""
+                swp_extreme = None
+                swp_bars = 0
+                max_reclaim = 3
+
+                entry_trade = None
 
                 for idx in range(1, len(day_candles)):
                     bar = day_candles.iloc[idx]
-                    h, l, c = float(bar["high"]), float(bar["low"]), float(bar["close"])
+                    prev_b = day_candles.iloc[idx - 1]
+                    prev2_b = day_candles.iloc[idx - 2] if idx >= 2 else prev_b
+                    h, l, c, o = float(bar["high"]), float(bar["low"]), float(bar["close"]), float(bar["open"])
                     v = float(bar["volume"])
                     v_spike = v >= (vol_ma.iloc[idx] * 1.15) if not np.isnan(vol_ma.iloc[idx]) else True
                     t = bar.name
 
-                    sweep_trigger = None
+                    # Candle structure check
+                    c_range = max(0.0001, h - l)
+                    lower_wick_ratio = (c - l) / c_range
+                    upper_wick_ratio = (h - c) / c_range
+                    is_bullish_reclaim = (c > o) or (lower_wick_ratio >= 0.55)
+                    is_bearish_reclaim = (c < o) or (upper_wick_ratio >= 0.55)
 
-                    if allowed_side == "BUY" and v_spike:
-                        for pool_lvl in target_pools:
-                            if pool_lvl is not None and l < pool_lvl and c > pool_lvl:
-                                sl_price = l - atr_buf
-                                tp_price = max(pdh, c + (2.0 * atr_val))
-                                if (tp_price - c) / max(0.01, c - sl_price) >= 1.6:
-                                    sweep_trigger = ("BUY", c, sl_price, tp_price, f"SWEEP_RECLAIM_{pool_lvl:.2f}")
+                    reclaim_triggered = False
+
+                    if allowed_side == "BUY":
+                        if swp_state == "IDLE":
+                            for pool_name, pool_lvl in target_pools:
+                                was_above = (float(prev_b["close"]) >= pool_lvl) or (float(prev2_b["close"]) >= pool_lvl)
+                                valid_depth = (pool_lvl - l) <= (1.5 * atr_val)
+
+                                if was_above and l < pool_lvl and valid_depth and v_spike:
+                                    swp_lvl = pool_lvl
+                                    swp_name = pool_name
+                                    swp_extreme = l
+                                    swp_bars = 1
+
+                                    # 1-Bar Pinbar/Hammer reclaim
+                                    if c > pool_lvl and is_bullish_reclaim:
+                                        reclaim_triggered = True
+                                    else:
+                                        swp_state = "SWEPT"
                                     break
 
-                    elif allowed_side == "SELL" and v_spike:
-                        for pool_lvl in target_pools:
-                            if pool_lvl is not None and h > pool_lvl and c < pool_lvl:
-                                sl_price = h + atr_buf
-                                tp_price = min(pdl, c - (2.0 * atr_val))
-                                if (c - tp_price) / max(0.01, sl_price - c) >= 1.6:
-                                    sweep_trigger = ("SELL", c, sl_price, tp_price, f"SWEEP_RECLAIM_{pool_lvl:.2f}")
+                        elif swp_state == "SWEPT":
+                            swp_bars += 1
+                            swp_extreme = min(float(swp_extreme), l)
+
+                            # Invalidation: cascades > 1.5x ATR below level
+                            if (swp_lvl - swp_extreme) > (1.5 * atr_val) or swp_bars > max_reclaim:
+                                swp_state = "IDLE"
+                            elif c > swp_lvl and is_bullish_reclaim:
+                                reclaim_triggered = True
+
+                        if reclaim_triggered and swp_extreme is not None and swp_lvl is not None:
+                            sl_price = swp_extreme - atr_buf
+                            # Dynamic opposing TP target
+                            session_h = float(day_candles.iloc[:idx+1]["high"].max())
+                            tp_candidates = [
+                                lvl for lvl in [or_high, session_h, pdh, pdc]
+                                if lvl is not None and lvl > c + (1.2 * atr_val)
+                            ]
+                            tp_price = min(tp_candidates) if tp_candidates else c + (2.2 * atr_val)
+
+                            if (tp_price - c) / max(0.01, c - sl_price) >= 1.6:
+                                entry_trade = ("BUY", c, sl_price, tp_price, f"{swp_name}_RECLAIM")
+                                break
+                            else:
+                                swp_state = "IDLE"
+
+                    elif allowed_side == "SELL":
+                        if swp_state == "IDLE":
+                            for pool_name, pool_lvl in target_pools:
+                                was_below = (float(prev_b["close"]) <= pool_lvl) or (float(prev2_b["close"]) <= pool_lvl)
+                                valid_depth = (h - pool_lvl) <= (1.5 * atr_val)
+
+                                if was_below and h > pool_lvl and valid_depth and v_spike:
+                                    swp_lvl = pool_lvl
+                                    swp_name = pool_name
+                                    swp_extreme = h
+                                    swp_bars = 1
+
+                                    # 1-Bar Shooting Star reclaim
+                                    if c < pool_lvl and is_bearish_reclaim:
+                                        reclaim_triggered = True
+                                    else:
+                                        swp_state = "SWEPT"
                                     break
 
-                    if sweep_trigger is not None:
-                        e_side, e_p, e_sl, e_tp, e_reason = sweep_trigger
-                        risk_per_share = abs(e_p - e_sl)
-                        qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
+                        elif swp_state == "SWEPT":
+                            swp_bars += 1
+                            swp_extreme = max(float(swp_extreme), h)
 
-                        active_positions[ticker] = {
-                            "ticker": ticker, "position": e_side, "entry_date": d_str,
-                            "entry_time": t, "entry_price": e_p, "quantity": qty,
-                            "stop_loss": e_sl, "take_profit": e_tp, "current_price": e_p,
-                            "selector_id": 2, "initial_risk": risk_per_share, "breakeven_ratchet": False,
-                            "be_trigger_r": 1.2
-                        }
-                        break
+                            # Invalidation: cascades > 1.5x ATR above level
+                            if (swp_extreme - swp_lvl) > (1.5 * atr_val) or swp_bars > max_reclaim:
+                                swp_state = "IDLE"
+                            elif c < swp_lvl and is_bearish_reclaim:
+                                reclaim_triggered = True
+
+                        if reclaim_triggered and swp_extreme is not None and swp_lvl is not None:
+                            sl_price = swp_extreme + atr_buf
+                            # Dynamic opposing TP target
+                            session_l = float(day_candles.iloc[:idx+1]["low"].min())
+                            tp_candidates = [
+                                lvl for lvl in [or_low, session_l, pdl, pdc]
+                                if lvl is not None and lvl < c - (1.2 * atr_val)
+                            ]
+                            tp_price = max(tp_candidates) if tp_candidates else c - (2.2 * atr_val)
+
+                            if (c - tp_price) / max(0.01, sl_price - c) >= 1.6:
+                                entry_trade = ("SELL", c, sl_price, tp_price, f"{swp_name}_RECLAIM")
+                                break
+                            else:
+                                swp_state = "IDLE"
+
+                if entry_trade is not None:
+                    e_side, e_p, e_sl, e_tp, e_reason = entry_trade
+                    risk_per_share = max(abs(e_p - e_sl), 0.8 * atr_val, e_p * 0.008)
+                    qty = floor((initial_portfolio * eff_risk) / risk_per_share)
+                    qty = max(1, min(qty, floor((initial_portfolio * 0.50) / e_p)))
+
+                    active_positions[ticker] = {
+                        "ticker": ticker, "position": e_side, "entry_date": d_str,
+                        "entry_time": t, "entry_price": e_p, "quantity": qty,
+                        "stop_loss": e_sl, "take_profit": e_tp, "current_price": e_p,
+                        "selector_id": sig.selector_id, "initial_risk": abs(e_p - e_sl),
+                        "breakeven_ratchet": False, "be_trigger_r": 1.2
+                    }
+                    break
 
         # ── 2. MONITOR ACTIVE POSITIONS ACROSS CURR_DATE CANDLES ─────────────
         closed_tickers = []
