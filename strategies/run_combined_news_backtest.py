@@ -2,26 +2,29 @@
 Combined News Strategies Backtest Runner (run_combined_news_backtest.py)
 ========================================================================
 Runs comparative multi-day portfolio backtests for:
-1. Market Reactor (Baseline - Open Execution + Selector S/R)
-2. News + MultiTimeframe Key Levels & Fibonacci
-3. News + Liquidity Sweep Engine
+1. Market Reactor - Dynamic (ORB + Gap Guard + Squeeze & Fade)
+2. Market Reactor - Momentum Mode (ORB Squeeze Only)
+3. Market Reactor - Fade Mode (Fundamental Reversal Only)
+4. News + MultiTimeframe Key Levels & Fibonacci
+5. News + Liquidity Sweep Engine
+6. Benchmarks: SPY & NASDAQ-100 (QQQ) Buy & Hold ($100k Allocation)
 
-Evaluates both:
-- Full 5-Trading-Day Week (Oct 14 - Oct 20, 2026)
-- Recent Calendar Week (Oct 28 - Oct 29, 2026)
-
-Reports:
-- Total Closed P&L (Realized)
-- Total Open P&L (Unrealized Overnight)
-- Total Combined Net P&L
-- Win Rate, Profit Factor, Trade Breakdown
+Key Institutional Execution Upgrades:
+- 15-Minute Opening Range Breakout (ORB) (9:30 - 9:45 AM EST).
+- Daily Gap-to-ATR Exhaustion Guard (> 1.5x Daily ATR).
+- Selector 1 (1H Swing, +1.5R breakeven ratchet, overnight allowed).
+- Selector 2 (15m Intraday, strict 15:55 EST flatten, momentum/fade modes).
+- Selector 3 (15m Intraday, conditional overnight hold if >= +0.5R at 15:50 EST).
+- Conviction-Weighted Risk (1.0% to 2.5%, halved on exhausted gap).
+- Order cancellation before flatten to eliminate orphan fills.
+- Dual-cohort zero-lookahead for after-hours (> 16:00 EST) and intraday signals.
 """
 
 import os
 import sys
 import json
 import logging
-from math import floor
+from math import floor, sqrt
 from datetime import datetime, date, time, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -48,11 +51,13 @@ def simulate_strategy_engine(
     ticker_data_map: Dict[str, pd.DataFrame],
     all_market_dates: Optional[List[str]] = None,
     initial_portfolio: float = 100000.0,
-    risk_pct: float = 0.02
+    base_risk_pct: float = 0.015,
+    max_risk_pct: float = 0.025,
+    selector2_mode: str = "dynamic"  # "dynamic", "momentum", "fade"
 ) -> Dict[str, Any]:
     """
     Simulates a specific technical engine gated by news direction over multiple days.
-    Accurately carries active positions overnight across all market trading sessions.
+    Accurately carries active positions overnight across all continuous market trading sessions.
     """
     sorted_dates = sorted(all_market_dates) if all_market_dates else sorted(date_list)
     active_positions: Dict[str, Dict[str, Any]] = {}
@@ -62,68 +67,163 @@ def simulate_strategy_engine(
         curr_date = pd.to_datetime(d_str).date()
         daily_sigs = [s for d, s in all_eligible_signals if d == d_str]
 
+        # Filter out signals created after 16:00 EST on d_str (they belong to next session)
+        session_sigs = []
         for sig in daily_sigs:
+            if sig.created_at is not None and sig.signal_date == d_str and sig.created_at.time() >= time(16, 0):
+                continue
+            session_sigs.append(sig)
+
+        # ── 1. ENTRY EVALUATION ACROSS NEW CANDLES ON CURR_DATE ──────────────
+        for sig in session_sigs:
             ticker = sig.ticker
             if ticker in active_positions or ticker not in ticker_data_map:
                 continue
 
             df = ticker_data_map[ticker]
             day_candles = df[df.index.date == curr_date]
-            if day_candles.empty:
+            if len(day_candles) < 2:
                 continue
 
-            allowed_side = sig.signal_position  # "BUY" or "SELL"
-            first_bar = day_candles.iloc[0]
-            open_price = float(first_bar["open"])
-            open_time = first_bar.name
+            # First candle (09:30 - 09:45) establishes 15m Opening Range
+            bar0 = day_candles.iloc[0]
+            open_price = float(bar0["open"])
+            or_high = float(bar0["high"])
+            or_low = float(bar0["low"])
 
-            # ── 1. ENGINE 1: MARKET REACTOR BASELINE ─────────────────────────
+            # Compute Gap-to-ATR Exhaustion Guard
+            prior_bars = df[df.index.date < curr_date]
+            prev_close = float(prior_bars.iloc[-1]["close"]) if not prior_bars.empty else open_price
+            daily_atr = calculate_atr(prior_bars, length=14) or (open_price * 0.02)
+            gap_ratio = abs(open_price - prev_close) / daily_atr if daily_atr > 0 else 0.0
+            is_exhausted_gap = gap_ratio > 1.5
+
+            # Conviction-weighted position sizing (1.5% to 2.5%, halved if gap is exhausted)
+            conv_score = getattr(sig, "composite_conviction", sqrt(max(0.0, sig.fundamental_confidence) * max(0.0, sig.news_conviction)))
+            conv_norm = max(0.0, min(1.0, (conv_score - 0.70) / 0.30))
+            eff_risk = base_risk_pct + conv_norm * (max_risk_pct - base_risk_pct)
+            if is_exhausted_gap:
+                eff_risk *= 0.50
+
+            vol_ma = day_candles["volume"].rolling(20).mean()
+
+            # ── ENGINE A: MARKET REACTOR (UPGRADED SELECTORS 1, 2, 3) ────────
             if strategy_name == "MarketReactor":
-                entry_price = open_price
-                entry_time = open_time
+                for idx in range(1, len(day_candles)):
+                    bar = day_candles.iloc[idx]
+                    t = bar.name
+                    bar_time = t.time()
+                    if bar_time >= time(15, 30):
+                        break
 
-                # Determine S/R & ATR based on selector timeframe
-                atr_val = calculate_atr(df[df.index <= entry_time], length=14) or (entry_price * 0.015)
-                tf = getattr(sig, "sr_timeframe", "1H")
-                prior_bars = df[df.index < entry_time]
-                if tf == "15m":
-                    recent_bars = prior_bars.tail(16)
-                elif tf == "30m":
-                    recent_bars = prior_bars.tail(28)
-                else:  # 1H
-                    recent_bars = prior_bars.tail(40)
+                    # Zero-lookahead: intraday catalyst must have arrived by bar_time
+                    if sig.created_at is not None and sig.signal_date == d_str and bar_time < sig.created_at.time():
+                        continue
 
-                sup = float(recent_bars["low"].min()) if not recent_bars.empty else entry_price * 0.98
-                res = float(recent_bars["high"].max()) if not recent_bars.empty else entry_price * 1.02
+                    p = float(bar["close"])
+                    v = float(bar["volume"])
+                    avg_v = vol_ma.iloc[idx] if not np.isnan(vol_ma.iloc[idx]) else v
+                    rvol = (v / avg_v) if avg_v > 0 else 1.5
 
-                side = "buy" if allowed_side == "BUY" else "sell"
-                raw_sl = sup if allowed_side == "BUY" else res
-                raw_tp = res if allowed_side == "BUY" else sup
+                    prior_df = df[df.index < t]
+                    atr_val = calculate_atr(prior_df, length=14) or (open_price * 0.015)
 
-                rl = optimize_sl_tp(
-                    entry_price=entry_price,
-                    stop_loss=raw_sl,
-                    take_profit=raw_tp,
-                    side=side,
-                    atr=atr_val,
-                    trading_style="swing_trading",
-                    risk_reward_ratio=1.5
-                )
-                sl_price, tp_price = float(rl.stop_loss), float(rl.take_profit)
+                    tf_bars = prior_df.tail(40 if sig.selector_id == 1 else 16)
+                    sup = float(tf_bars["low"].min()) if not tf_bars.empty else (or_low if or_low < p else p - (1.5 * atr_val))
+                    res = float(tf_bars["high"].max()) if not tf_bars.empty else p + (2.5 * atr_val)
 
-                risk_per_share = abs(entry_price - sl_price)
-                qty = floor((initial_portfolio * risk_pct) / max(0.01, risk_per_share))
-                qty = max(1, min(qty, floor((initial_portfolio * 0.95) / entry_price)))
+                    allowed_side = sig.signal_position  # "BUY" or "SELL" (news direction)
+                    entry_triggered = False
+                    resolved_side = allowed_side
 
-                active_positions[ticker] = {
-                    "ticker": ticker, "position": allowed_side, "entry_date": d_str,
-                    "entry_time": entry_time, "entry_price": entry_price, "quantity": qty,
-                    "stop_loss": sl_price, "take_profit": tp_price, "current_price": entry_price
-                }
+                    # Selector 1: Macro Alignment (News + Fundamentals Agree)
+                    if sig.selector_id == 1:
+                        if allowed_side == "BUY":
+                            if p >= or_high:
+                                entry_triggered = True
+                                resolved_side = "BUY"
+                            elif not is_exhausted_gap and p > or_low and (p - or_low) <= (0.5 * atr_val):
+                                entry_triggered = True
+                                resolved_side = "BUY"
+                        else:  # SELL
+                            if p <= or_low:
+                                entry_triggered = True
+                                resolved_side = "SELL"
+                            elif not is_exhausted_gap and p < or_high and (or_high - p) <= (0.5 * atr_val):
+                                entry_triggered = True
+                                resolved_side = "SELL"
 
-            # ── 2. ENGINE 2: NEWS + MULTI-TIMEFRAME KEY LEVELS & FIBONACCI ──
+                    # Selector 2: Catalyst Momentum vs. Fundamental Fade
+                    elif sig.selector_id == 2:
+                        fund_dir = "SELL" if allowed_side == "BUY" else "BUY"
+
+                        # Mode A: Momentum Squeeze
+                        if selector2_mode in ("momentum", "dynamic"):
+                            if allowed_side == "BUY" and p > or_high and rvol >= 1.8 and not is_exhausted_gap:
+                                entry_triggered = True
+                                resolved_side = "BUY"
+                            elif allowed_side == "SELL" and p < or_low and rvol >= 1.8 and not is_exhausted_gap:
+                                entry_triggered = True
+                                resolved_side = "SELL"
+
+                        # Mode B: Fundamental Fade
+                        if not entry_triggered and selector2_mode in ("fade", "dynamic"):
+                            if allowed_side == "BUY" and p < or_low:
+                                entry_triggered = True
+                                resolved_side = "SELL"  # fade failed news into fundamental SELL
+                            elif allowed_side == "SELL" and p > or_high:
+                                entry_triggered = True
+                                resolved_side = "BUY"  # fade into fundamental BUY
+
+                    # Selector 3: Directional Flow (Neutral Fundamentals)
+                    else:
+                        if allowed_side == "BUY" and p >= or_high and rvol >= 1.3:
+                            entry_triggered = True
+                            resolved_side = "BUY"
+                        elif allowed_side == "SELL" and p <= or_low and rvol >= 1.3:
+                            entry_triggered = True
+                            resolved_side = "SELL"
+
+                    if entry_triggered:
+                        side_str = "buy" if resolved_side == "BUY" else "sell"
+                        raw_sl = sup if resolved_side == "BUY" else res
+                        raw_tp = res if resolved_side == "BUY" else sup
+
+                        trading_style = getattr(sig, "trading_style", "swing_trading" if sig.selector_id == 1 else "day_trading")
+                        rl = optimize_sl_tp(
+                            entry_price=p,
+                            stop_loss=raw_sl,
+                            take_profit=raw_tp,
+                            side=side_str,
+                            atr=atr_val,
+                            trading_style=trading_style,
+                            risk_reward_ratio=1.5
+                        )
+                        sl_price, tp_price = float(rl.stop_loss), float(rl.take_profit)
+                        risk_per_share = abs(p - sl_price)
+
+                        qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
+                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / p)))
+
+                        active_positions[ticker] = {
+                            "ticker": ticker,
+                            "position": resolved_side,
+                            "entry_date": d_str,
+                            "entry_time": t,
+                            "entry_price": p,
+                            "quantity": qty,
+                            "stop_loss": sl_price,
+                            "take_profit": tp_price,
+                            "current_price": p,
+                            "selector_id": sig.selector_id,
+                            "initial_risk": risk_per_share,
+                            "breakeven_ratchet": False
+                        }
+                        break
+
+            # ── ENGINE B: NEWS + MULTI-TIMEFRAME KEY LEVELS & FIBONACCI ──────
             elif strategy_name == "News_MTF_KeyLevels":
-                # Compute multi-TF levels up to market open
+                open_time = bar0.name
                 prior_df = df[df.index < open_time]
                 if len(prior_df) < 20:
                     continue
@@ -131,7 +231,6 @@ def simulate_strategy_engine(
                 atr_val = calculate_atr(prior_df, length=14) or (open_price * 0.015)
                 atr_buf = atr_val * 0.5
 
-                # Generate 1D, 15m levels
                 df_1d = prior_df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
                 df_15m = prior_df.resample("15min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
 
@@ -146,16 +245,14 @@ def simulate_strategy_engine(
                 sups = merged_l[merged_l["type"] == "support"].sort_values("level_price", ascending=False) if not merged_l.empty else pd.DataFrame()
                 resists = merged_l[merged_l["type"] == "resistance"].sort_values("level_price", ascending=True) if not merged_l.empty else pd.DataFrame()
 
-                # Fibonacci setups
                 fib_setups = get_fibonacci_trade_setups(df_15m, resolution="15m", backcandles=30) if len(df_15m) >= 15 else pd.DataFrame()
 
-                # Scan RTH candles on curr_date for trigger
+                allowed_side = sig.signal_position
                 for idx in range(len(day_candles)):
                     bar = day_candles.iloc[idx]
                     p = float(bar["close"])
                     t = bar.name
 
-                    # Check Fib setup in allowed side
                     matched = False
                     if not fib_setups.empty:
                         for _, f_row in fib_setups.iterrows():
@@ -168,7 +265,6 @@ def simulate_strategy_engine(
                                 matched = True
                                 break
 
-                    # Check Key Level bounce
                     if not matched:
                         if allowed_side == "BUY" and not sups.empty:
                             nearest_s = float(sups.iloc[0]["level_price"])
@@ -185,18 +281,20 @@ def simulate_strategy_engine(
 
                     if matched and abs(tp_price - p) >= (1.5 * abs(p - sl_price)):
                         risk_per_share = abs(p - sl_price)
-                        qty = floor((initial_portfolio * risk_pct) / max(0.01, risk_per_share))
+                        qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
                         qty = max(1, min(qty, floor((initial_portfolio * 0.95) / p)))
 
                         active_positions[ticker] = {
                             "ticker": ticker, "position": allowed_side, "entry_date": d_str,
                             "entry_time": t, "entry_price": p, "quantity": qty,
-                            "stop_loss": sl_price, "take_profit": tp_price, "current_price": p
+                            "stop_loss": sl_price, "take_profit": tp_price, "current_price": p,
+                            "selector_id": 1, "initial_risk": risk_per_share, "breakeven_ratchet": False
                         }
                         break
 
-            # ── 3. ENGINE 3: NEWS + LIQUIDITY SWEEP ──────────────────────────
+            # ── ENGINE C: NEWS + LIQUIDITY SWEEP ────────────────────────────
             elif strategy_name == "News_LiquiditySweep":
+                open_time = bar0.name
                 prior_dates = sorted(list(set(df[df.index.date < curr_date].index.date)))
                 if not prior_dates:
                     continue
@@ -211,12 +309,10 @@ def simulate_strategy_engine(
                 atr_val = calculate_atr(df[df.index <= open_time], length=14) or (open_price * 0.015)
                 atr_buf = atr_val * 0.5
 
-                vol_ma = day_candles["volume"].rolling(20).mean()
-
-                # Scan RTH candles for sweep & reclaim
                 swept = False
                 sweep_ext = None
                 sweep_bars = 0
+                allowed_side = sig.signal_position
 
                 for idx in range(len(day_candles)):
                     bar = day_candles.iloc[idx]
@@ -234,19 +330,19 @@ def simulate_strategy_engine(
                         elif swept:
                             sweep_bars += 1
                             sweep_ext = min(sweep_ext, l)
-                            # Reclaim inside PDL
                             if c > pdl:
                                 sl_price = sweep_ext - atr_buf
                                 tp_price = pdh
                                 if (tp_price - c) >= (1.5 * (c - sl_price)):
                                     risk_per_share = abs(c - sl_price)
-                                    qty = floor((initial_portfolio * risk_pct) / max(0.01, risk_per_share))
+                                    qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
                                     qty = max(1, min(qty, floor((initial_portfolio * 0.95) / c)))
 
                                     active_positions[ticker] = {
                                         "ticker": ticker, "position": "BUY", "entry_date": d_str,
                                         "entry_time": t, "entry_price": c, "quantity": qty,
-                                        "stop_loss": sl_price, "take_profit": tp_price, "current_price": c
+                                        "stop_loss": sl_price, "take_profit": tp_price, "current_price": c,
+                                        "selector_id": 2, "initial_risk": risk_per_share, "breakeven_ratchet": False
                                     }
                                     break
                             if sweep_bars > 4:
@@ -261,25 +357,25 @@ def simulate_strategy_engine(
                         elif swept:
                             sweep_bars += 1
                             sweep_ext = max(sweep_ext, h)
-                            # Reclaim back below PDH
                             if c < pdh:
                                 sl_price = sweep_ext + atr_buf
                                 tp_price = pdl
                                 if (c - tp_price) >= (1.5 * (sl_price - c)):
                                     risk_per_share = abs(sl_price - c)
-                                    qty = floor((initial_portfolio * risk_pct) / max(0.01, risk_per_share))
+                                    qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
                                     qty = max(1, min(qty, floor((initial_portfolio * 0.95) / c)))
 
                                     active_positions[ticker] = {
                                         "ticker": ticker, "position": "SELL", "entry_date": d_str,
                                         "entry_time": t, "entry_price": c, "quantity": qty,
-                                        "stop_loss": sl_price, "take_profit": tp_price, "current_price": c
+                                        "stop_loss": sl_price, "take_profit": tp_price, "current_price": c,
+                                        "selector_id": 2, "initial_risk": risk_per_share, "breakeven_ratchet": False
                                     }
                                     break
                             if sweep_bars > 4:
                                 swept = False
 
-        # Evaluate intraday price action against TP/SL for all active positions
+        # ── 2. MONITOR ACTIVE POSITIONS ACROSS CURR_DATE CANDLES ─────────────
         closed_tickers = []
         for ticker, pos in active_positions.items():
             if ticker not in ticker_data_map:
@@ -288,9 +384,44 @@ def simulate_strategy_engine(
 
             for b_idx in range(len(eval_candles)):
                 bar = eval_candles.iloc[b_idx]
-                h, l = float(bar["high"]), float(bar["low"])
-                pos["current_price"] = float(bar["close"])
+                h, l, c = float(bar["high"]), float(bar["low"]), float(bar["close"])
+                pos["current_price"] = c
+                b_time = bar.name.time()
 
+                # Selector 1: Breakeven Stop Ratchet at +1.5R
+                if pos.get("selector_id") == 1 and not pos.get("breakeven_ratchet", False):
+                    signed_gain = (c - pos["entry_price"]) if pos["position"] == "BUY" else (pos["entry_price"] - c)
+                    r_mult = signed_gain / pos["initial_risk"] if pos["initial_risk"] > 0 else 0.0
+                    if r_mult >= 1.50:
+                        pos["stop_loss"] = pos["entry_price"]
+                        pos["breakeven_ratchet"] = True
+
+                # Selector 2: Strict Intraday Flatten at 15:55 EST (15:45 bar close) on entry date
+                if pos.get("selector_id") == 2 and pos["entry_date"] == d_str and b_time >= time(15, 45):
+                    pos["status"] = "EOD_SEL2_FLATTEN"
+                    pos["exit_price"] = c
+                    pos["exit_time"] = bar.name
+                    pos["pnl"] = (c - pos["entry_price"]) * pos["quantity"] if pos["position"] == "BUY" else (pos["entry_price"] - c) * pos["quantity"]
+                    pos["pnl_pct"] = (c - pos["entry_price"]) / pos["entry_price"] if pos["position"] == "BUY" else (pos["entry_price"] - c) / pos["entry_price"]
+                    completed_trades.append(pos)
+                    closed_tickers.append(ticker)
+                    break
+
+                # Selector 3: Conditional Overnight Flatten at 15:50 EST (15:45 bar close) if < +0.5R
+                if pos.get("selector_id") == 3 and pos["entry_date"] == d_str and b_time >= time(15, 45):
+                    signed_gain = (c - pos["entry_price"]) if pos["position"] == "BUY" else (pos["entry_price"] - c)
+                    r_mult = signed_gain / pos["initial_risk"] if pos["initial_risk"] > 0 else 0.0
+                    if r_mult < 0.50:
+                        pos["status"] = "EOD_SEL3_FLATTEN"
+                        pos["exit_price"] = c
+                        pos["exit_time"] = bar.name
+                        pos["pnl"] = signed_gain * pos["quantity"]
+                        pos["pnl_pct"] = signed_gain / pos["entry_price"]
+                        completed_trades.append(pos)
+                        closed_tickers.append(ticker)
+                        break
+
+                # TP & SL Checks
                 if pos["position"] == "BUY":
                     if h >= pos["take_profit"]:
                         pos["status"] = "HIT TAKE PROFIT"
@@ -302,7 +433,7 @@ def simulate_strategy_engine(
                         closed_tickers.append(ticker)
                         break
                     elif l <= pos["stop_loss"]:
-                        pos["status"] = "STOPPED OUT"
+                        pos["status"] = "STOPPED OUT" if not pos.get("breakeven_ratchet") else "BREAKEVEN EXIT"
                         pos["exit_price"] = pos["stop_loss"]
                         pos["exit_time"] = bar.name
                         pos["pnl"] = (pos["stop_loss"] - pos["entry_price"]) * pos["quantity"]
@@ -310,7 +441,7 @@ def simulate_strategy_engine(
                         completed_trades.append(pos)
                         closed_tickers.append(ticker)
                         break
-                else: # SELL
+                else:  # SELL
                     if l <= pos["take_profit"]:
                         pos["status"] = "HIT TAKE PROFIT"
                         pos["exit_price"] = pos["take_profit"]
@@ -321,7 +452,7 @@ def simulate_strategy_engine(
                         closed_tickers.append(ticker)
                         break
                     elif h >= pos["stop_loss"]:
-                        pos["status"] = "STOPPED OUT"
+                        pos["status"] = "STOPPED OUT" if not pos.get("breakeven_ratchet") else "BREAKEVEN EXIT"
                         pos["exit_price"] = pos["stop_loss"]
                         pos["exit_time"] = bar.name
                         pos["pnl"] = (pos["entry_price"] - pos["stop_loss"]) * pos["quantity"]
@@ -330,8 +461,10 @@ def simulate_strategy_engine(
                         closed_tickers.append(ticker)
                         break
 
+        # Cancel orders and remove closed positions to prevent orphan order fills
         for t in closed_tickers:
-            del active_positions[t]
+            if t in active_positions:
+                del active_positions[t]
 
     # Evaluate remaining open positions at latest available price
     open_trades: List[Dict[str, Any]] = []
@@ -366,7 +499,7 @@ def simulate_strategy_engine(
     net_pnl = c_pnl + o_pnl
     tot_trades = len(completed_trades) + len(open_trades)
     tp_hits = len(df_c[df_c["status"] == "HIT TAKE PROFIT"]) if not df_c.empty else 0
-    sl_hits = len(df_c[df_c["status"] == "STOPPED OUT"]) if not df_c.empty else 0
+    sl_hits = len(df_c[df_c["status"].str.contains("STOP", na=False)]) if not df_c.empty else 0
     win_rate = (tp_hits / len(df_c)) if len(df_c) > 0 else 0.0
 
     gross_profit = float(df_c[df_c["pnl"] > 0]["pnl"].sum()) if not df_c.empty else 0.0
@@ -412,12 +545,15 @@ def run_comparative_backtest(period_mode: str = "month"):
         print(f" EXECUTING COMPARATIVE EVALUATION: {period_title} ({date_list[0]} to {date_list[-1]})")
         print("=" * 105)
 
-        # Ingest eligible signals
+        # Ingest eligible signals including prior after-hours
         all_eligible: List[Tuple[str, ReactorSignal]] = []
         for d in date_list:
-            sigs = fetch_reactor_signals(d)
+            sigs = fetch_reactor_signals(d, include_prev_afterhours=True)
             elig = [s for s in sigs if s.is_eligible]
-            elig.sort(key=lambda x: (x.fundamental_confidence * x.news_conviction), reverse=True)
+            elig.sort(
+                key=lambda x: getattr(x, "composite_conviction", x.fundamental_confidence * x.news_conviction),
+                reverse=True
+            )
             if max_per_day and len(elig) > max_per_day:
                 elig = elig[:max_per_day]
             for s in elig:
@@ -426,10 +562,10 @@ def run_comparative_backtest(period_mode: str = "month"):
         unique_tickers = list(dict.fromkeys([s.ticker for _, s in all_eligible]))
         print(f"Total Eligible News Signals: {len(all_eligible)} | Unique Tickers: {len(unique_tickers)}")
 
-        # Batch download market data including SPY and QQQ benchmarks
+        # Batch download market data (extends 5 trading days after date_list[-1] for multi-day runners)
         all_syms = list(unique_tickers) + ["SPY", "QQQ"]
         start_dt = pd.to_datetime(date_list[0]) - timedelta(days=14)
-        end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=2)
+        end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=5)
         print(f"Downloading market data for {len(all_syms)} tickers (including SPY & QQQ benchmarks)...")
 
         ticker_data_map: Dict[str, pd.DataFrame] = {}
@@ -476,7 +612,7 @@ def run_comparative_backtest(period_mode: str = "month"):
 
         print(f"Data ready for {len(ticker_data_map)} assets. Extracting full continuous trading schedule...")
 
-        # Extract all continuous trading days in period from SPY or first asset
+        # Extract continuous trading days
         all_market_dates = []
         ref_df = ticker_data_map.get("SPY", next(iter(ticker_data_map.values()), None))
         if ref_df is not None and not ref_df.empty:
@@ -486,31 +622,52 @@ def run_comparative_backtest(period_mode: str = "month"):
             all_market_dates = sorted(date_list)
 
         print(f"Total Market Trading Sessions in period: {len(all_market_dates)} days.")
-        print(f"Running simulations across 3 technical engines + Buy & Hold benchmarks...")
+        print(f"Running comparative simulations across Selector 2 modes + Technical Engines + Benchmarks...")
 
         results = []
-        # Run 1: Market Reactor Baseline
-        res_mr = simulate_strategy_engine(
-            "MarketReactor", date_list, all_eligible, ticker_data_map,
-            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio
-        )
-        results.append(res_mr)
 
-        # Run 2: News + MultiTimeframe Key Levels & Fib
+        # 1. Market Reactor - Dynamic Mode (ORB Squeeze + Fundamental Fade)
+        res_mr_dyn = simulate_strategy_engine(
+            "MarketReactor", date_list, all_eligible, ticker_data_map,
+            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio,
+            selector2_mode="dynamic"
+        )
+        res_mr_dyn["strategy"] = "MarketReactor (Dynamic)"
+        results.append(res_mr_dyn)
+
+        # 2. Market Reactor - Momentum Mode (ORB Squeeze Only)
+        res_mr_mom = simulate_strategy_engine(
+            "MarketReactor", date_list, all_eligible, ticker_data_map,
+            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio,
+            selector2_mode="momentum"
+        )
+        res_mr_mom["strategy"] = "MarketReactor (Momentum)"
+        results.append(res_mr_mom)
+
+        # 3. Market Reactor - Fade Mode (Fundamental Reversal Only)
+        res_mr_fade = simulate_strategy_engine(
+            "MarketReactor", date_list, all_eligible, ticker_data_map,
+            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio,
+            selector2_mode="fade"
+        )
+        res_mr_fade["strategy"] = "MarketReactor (Fade)"
+        results.append(res_mr_fade)
+
+        # 4. News + MultiTimeframe Key Levels & Fib
         res_mtf = simulate_strategy_engine(
             "News_MTF_KeyLevels", date_list, all_eligible, ticker_data_map,
             all_market_dates=all_market_dates, initial_portfolio=initial_portfolio
         )
         results.append(res_mtf)
 
-        # Run 3: News + Liquidity Sweep
+        # 5. News + Liquidity Sweep
         res_swp = simulate_strategy_engine(
             "News_LiquiditySweep", date_list, all_eligible, ticker_data_map,
             all_market_dates=all_market_dates, initial_portfolio=initial_portfolio
         )
         results.append(res_swp)
 
-        # Calculate Buy & Hold Benchmarks ($100k allocation each)
+        # 6. Calculate Buy & Hold Benchmarks ($100k allocation each)
         benchmarks = []
         for b_sym, b_name in [("SPY", "SPY (S&P 500 ETF)"), ("QQQ", "NASDAQ 100 (QQQ ETF)")]:
             if b_sym in ticker_data_map and not ticker_data_map[b_sym].empty:
@@ -531,9 +688,9 @@ def run_comparative_backtest(period_mode: str = "month"):
                     })
 
         # Format side-by-side performance table
-        print("\n" + "=" * 105)
+        print("\n" + "=" * 115)
         print(f" SIDE-BY-SIDE PERFORMANCE MATRIX — {period_title.upper()}")
-        print("=" * 105)
+        print("=" * 115)
 
         summary_rows = []
         for r in results:
@@ -571,9 +728,9 @@ def run_comparative_backtest(period_mode: str = "month"):
         if benchmarks:
             spy_b = next((b for b in benchmarks if b["symbol"] == "SPY"), None)
             qqq_b = next((b for b in benchmarks if b["symbol"] == "QQQ"), None)
-            print("\n" + "-" * 105)
+            print("\n" + "-" * 115)
             print(" OUTPERFORMANCE (ALPHA) RELATIVE TO $100K BENCHMARKS:")
-            print("-" * 105)
+            print("-" * 115)
             for r in results:
                 strat_ret = r["return_pct"]
                 strat_pnl = r["net_pnl"]
@@ -581,7 +738,7 @@ def run_comparative_backtest(period_mode: str = "month"):
                 qqq_alpha = (strat_ret - qqq_b["return_pct"]) if qqq_b else 0.0
                 spy_diff_pnl = (strat_pnl - spy_b["pnl"]) if spy_b else 0.0
                 qqq_diff_pnl = (strat_pnl - qqq_b["pnl"]) if qqq_b else 0.0
-                print(f" • {r['strategy']:<25}: vs SPY: {spy_alpha:+.2%} (${spy_diff_pnl:+,.2f}) | vs NASDAQ: {qqq_alpha:+.2%} (${qqq_diff_pnl:+,.2f})")
+                print(f" • {r['strategy']:<27}: vs SPY: {spy_alpha:+.2%} (${spy_diff_pnl:+,.2f}) | vs NASDAQ: {qqq_alpha:+.2%} (${qqq_diff_pnl:+,.2f})")
 
         # Save to logs
         os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
