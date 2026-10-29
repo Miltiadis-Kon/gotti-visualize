@@ -5,27 +5,31 @@ Connects Stock Alchemist intelligence signals (fundamental & news sentiment)
 with automated market execution using Lumibot, institutional Key Levels clustering,
 and the unified StrategyBaseplate ATR volatility risk framework.
 
-Core Mechanics:
-1. Signal Ingestion:
-   - Ingests signals from MySQL `gotti.signals` joined with `gotti.fundamental_analysis`.
-   - Dual Hard Floor Confidence Filter:
-     * Fundamental Confidence >= 70% (from financial statements & valuation completeness)
-     * News Conviction >= 70% (from Gemini sentiment rating & catalyst impact)
-2. Three Selectors:
-   - Selector 1 (Macro Alignment): News & Fundamentals in same direction -> 1-Hour (1h) S/R + ATR
-   - Selector 2 (Catalyst Momentum): News opposing Fundamentals (e.g. Bullish on Value Trap) -> 15-Minute (15m) S/R + ATR
-   - Selector 3 (Directional Flow): News with Neutral/HOLD Fundamentals -> 30-Minute (30m) S/R + ATR
-3. Execution:
-   - Market open (9:30 AM EST) bracket order execution (Entry, Stop Loss, Take Profit).
-   - Position sizing: 2% portfolio risk per trade.
-   - Overnight holding allowed until either TP or SL is triggered.
+Upgraded Architecture:
+1. Dual-Cohort Timestamp Routing (Zero Lookahead):
+   - Pre-RTH Cohort (<= 09:30 EST): Traded via 9:30-9:45 AM Opening Range Breakout (ORB)
+     with a Daily Gap-to-ATR Exhaustion Guard.
+   - Intraday RTH Cohort (09:30 - 15:30 EST): Traded dynamically after signal arrival
+     using a 5m Catalyst Arrival Bar breakout & RVOL filter.
+   - Post-RTH Cohort (>= 16:00 EST): Deferred to the next trading session's morning ORB.
+2. Three Regime-Specific Selectors:
+   - Selector 1 (Macro Alignment): News & Fundamentals agree -> 1H S/R + 1H ATR
+     ("swing_trading" style, overnight allowed, breakeven stop ratchet at +1.5R).
+   - Selector 2 (Catalyst Momentum / Fade): News opposes Fundamentals -> 15m S/R + 15m ATR
+     ("day_trading" / "scalping" style, supports "momentum", "fade", and "dynamic" modes,
+     RVOL > 2.0 check, strict EOD flatten at 15:55 EST).
+   - Selector 3 (Directional Flow): News with Neutral/HOLD Fundamentals -> 15m S/R + 15m ATR
+     ("day_trading" style, volume-confirmed breakout, conditional overnight only if >= +0.5R at 15:50 EST).
+3. Conviction-Weighted Risk & ATR Fallbacks:
+   - Scales portfolio risk dynamically between 1.0% and 2.5% based on Composite Conviction.
+   - Replaces static 2% S/R fallbacks with dynamic ATR volatility projections on unmapped breakouts.
 """
 
 import os
 import sys
 import json
 import logging
-from math import floor
+from math import floor, sqrt
 from datetime import datetime, date, time, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
@@ -59,20 +63,24 @@ logger = logging.getLogger("MarketReactor")
 @dataclass
 class ReactorSignal:
     ticker: str
-    signal_position: str         # "BUY" or "SELL"
-    fundamental_sentiment: str   # e.g. "BUY", "SELL [VALUE TRAP]", "HOLD"
-    news_sentiment: str          # "POSITIVE" or "NEGATIVE"
+    signal_position: str          # Raw DB position ("BUY" or "SELL" - follows News)
+    fundamental_sentiment: str    # e.g. "BUY", "SELL [VALUE TRAP]", "HOLD"
+    news_sentiment: str           # "POSITIVE" or "NEGATIVE"
     headline: str
     fundamental_confidence: float # 0.0 to 1.0 (from fundamental_analysis.data)
     news_conviction: float        # 0.0 to 1.0 (from gemini rating & impact)
-    is_eligible: bool            # True if BOTH >= 0.70
-    selector_id: int             # 1, 2, or 3
-    selector_name: str           # "Macro Alignment", "Catalyst Momentum", "Directional Flow"
-    sr_timeframe: str            # "1H", "15m", or "30m"
-    resolution_code: str         # "1H" or "15m" for key_levels analyzer
-    gemini_rating: int           # 1 to 5
-    gemini_impact: str           # "High", "Medium", "Low"
+    composite_conviction: float   # sqrt(fund_conf * news_conv) for dynamic sizing
+    is_eligible: bool             # True if BOTH >= 0.70
+    selector_id: int              # 1, 2, or 3
+    selector_name: str            # "Macro Alignment", "Catalyst Momentum", "Directional Flow"
+    sr_timeframe: str             # "1H" or "15m"
+    resolution_code: str          # "1H" or "15m" (supported by KeyLevelDetector)
+    trading_style: str            # "swing_trading", "day_trading", or "scalping"
+    gemini_rating: int            # 1 to 5
+    gemini_impact: str            # "High", "Medium", "Low"
     raw_signal_id: str
+    signal_date: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class MarketReactorClassifier:
@@ -87,16 +95,6 @@ class MarketReactorClassifier:
     def calculate_news_conviction(cls, gemini_rating: int, impact_level: str) -> float:
         """
         Calculates News Conviction (0.0 to 1.0) from Gemini rating (1-5) and impact type.
-        
-        Rating Distance from Neutral:
-        - Rating 5 or 1 (Strong Buy / Strong Sell) -> 1.00 base conviction
-        - Rating 4 or 2 (Bullish / Bearish)        -> 0.80 base conviction
-        - Rating 3 (Neutral / Noise)               -> 0.50 base conviction (always rejected)
-        
-        Impact Multiplier:
-        - High   -> 1.00
-        - Medium -> 0.95
-        - Low    -> 0.75
         """
         if gemini_rating in (1, 5):
             base_conviction = 1.00
@@ -119,7 +117,7 @@ class MarketReactorClassifier:
     def classify_signal(cls, raw_row: Dict[str, Any], fa_data: Optional[Dict[str, Any]] = None) -> ReactorSignal:
         ticker = str(raw_row.get("ticker", "")).strip().upper()
         signal_pos = str(raw_row.get("signal_position", "BUY")).strip().upper()
-        
+
         # Parse sentiment JSON
         sentiment = raw_row.get("sentiment") or {}
         if isinstance(sentiment, str):
@@ -132,7 +130,7 @@ class MarketReactorClassifier:
         fund_sentiment = str(sentiment.get("fundamental_sentiment", "HOLD")).strip().upper()
         headline = str(sentiment.get("headline", "")).strip()
 
-        # Extract Fundamental Confidence (Primary: fa_data.confidence, fallback: sentiment.confidence or 0.85)
+        # Extract Fundamental Confidence
         fund_conf = 0.85
         if fa_data and isinstance(fa_data, dict):
             fc = fa_data.get("confidence")
@@ -157,34 +155,60 @@ class MarketReactorClassifier:
 
         # Dual Hard Floor check: BOTH must be >= 70%
         is_eligible = (fund_conf >= cls.MIN_CONFIDENCE_THRESHOLD) and (news_conv >= cls.MIN_CONFIDENCE_THRESHOLD)
+        composite_conv = round(sqrt(max(0.0, fund_conf) * max(0.0, news_conv)), 4)
 
-        # Routing between the 3 Selectors
+        # Parse Directional Alignment
         is_news_bullish = news_sentiment in ("POSITIVE", "BULLISH")
         is_news_bearish = news_sentiment in ("NEGATIVE", "BEARISH")
-        
-        is_fund_bullish = ("BUY" in fund_sentiment or "POSITIVE" in fund_sentiment or "UNDERVALUED" in fund_sentiment) and ("SELL" not in fund_sentiment)
-        is_fund_bearish = ("SELL" in fund_sentiment or "NEGATIVE" in fund_sentiment or "VALUE TRAP" in fund_sentiment or "VETO" in fund_sentiment or "DISTRESS" in fund_sentiment)
-        is_fund_neutral = ("HOLD" in fund_sentiment or "NEUTRAL" in fund_sentiment) and not is_fund_bearish and not is_fund_bullish
 
-        # Determine Selector
+        is_fund_bullish = (
+            ("BUY" in fund_sentiment or "POSITIVE" in fund_sentiment or "UNDERVALUED" in fund_sentiment)
+            and ("SELL" not in fund_sentiment)
+        )
+        is_fund_bearish = (
+            "SELL" in fund_sentiment
+            or "NEGATIVE" in fund_sentiment
+            or "VALUE TRAP" in fund_sentiment
+            or "VETO" in fund_sentiment
+            or "DISTRESS" in fund_sentiment
+        )
+
+        # Map into the 3 Selectors (using KeyLevelDetector supported resolutions: '1H' and '15m')
         if (is_news_bullish and is_fund_bullish) or (is_news_bearish and is_fund_bearish):
-            # Selector 1: Macro Alignment (1-Hour S/R)
+            # Selector 1: Macro Alignment (1H S/R, Swing Trading)
             selector_id = 1
             selector_name = "Macro Alignment"
             sr_timeframe = "1H"
             resolution_code = "1H"
+            trading_style = "swing_trading"
         elif (is_news_bullish and is_fund_bearish) or (is_news_bearish and is_fund_bullish):
-            # Selector 2: Catalyst Momentum Opposing Fundamentals (15-Minute S/R)
+            # Selector 2: Catalyst Momentum Opposing Fundamentals (15m S/R, Day Trading / Scalping)
             selector_id = 2
             selector_name = "Catalyst Momentum"
             sr_timeframe = "15m"
             resolution_code = "15m"
+            trading_style = "day_trading"
         else:
-            # Selector 3: Directional Flow on Neutral / Hold Fundamentals (30-Minute S/R)
+            # Selector 3: Directional Flow on Neutral / Hold Fundamentals (15m S/R, Day Trading)
             selector_id = 3
             selector_name = "Directional Flow"
-            sr_timeframe = "30m"
-            resolution_code = "15m"  # Computed using 15m/1H key levels
+            sr_timeframe = "15m"
+            resolution_code = "15m"
+            trading_style = "day_trading"
+
+        # Parse created_at timestamp
+        raw_created = raw_row.get("created_at")
+        created_dt: Optional[datetime] = None
+        if isinstance(raw_created, datetime):
+            created_dt = raw_created
+        elif isinstance(raw_created, str) and raw_created.strip():
+            try:
+                created_dt = pd.to_datetime(raw_created).to_pydatetime()
+            except Exception:
+                created_dt = None
+
+        raw_sig_date = raw_row.get("signal_date")
+        sig_date_str = str(raw_sig_date) if raw_sig_date is not None else None
 
         return ReactorSignal(
             ticker=ticker,
@@ -194,14 +218,18 @@ class MarketReactorClassifier:
             headline=headline,
             fundamental_confidence=round(fund_conf, 4),
             news_conviction=round(news_conv, 4),
+            composite_conviction=composite_conv,
             is_eligible=is_eligible,
             selector_id=selector_id,
             selector_name=selector_name,
             sr_timeframe=sr_timeframe,
             resolution_code=resolution_code,
+            trading_style=trading_style,
             gemini_rating=gemini_rating,
             gemini_impact=gemini_impact,
-            raw_signal_id=str(raw_row.get("signal_id", ""))
+            raw_signal_id=str(raw_row.get("signal_id", "")),
+            signal_date=sig_date_str,
+            created_at=created_dt,
         )
 
 
@@ -227,16 +255,34 @@ def get_mysql_connection():
     )
 
 
-def fetch_reactor_signals(target_date: str) -> List[ReactorSignal]:
+def fetch_reactor_signals(
+    target_date: str,
+    ticker: Optional[str] = None,
+    include_prev_afterhours: bool = True
+) -> List[ReactorSignal]:
     """
-    Fetches signals for a given target date from MySQL `signals` table,
-    joins linked `fundamental_analysis` record for confidence scores,
-    and returns classified ReactorSignal objects.
+    Fetches signals for a given target date from MySQL `signals` table.
+    If `include_prev_afterhours` is True, also fetches prior-day after-hours signals
+    (created_at >= 16:00 EST) so overnight catalysts can be traded at the 9:30 AM open.
     """
     conn = get_mysql_connection()
     cursor = conn.cursor(dictionary=True)
-    
-    query = """
+
+    target_dt = pd.to_datetime(target_date).date()
+    prev_dt = target_dt - timedelta(days=3 if target_dt.weekday() == 0 else 1)
+
+    params: List[Any] = [str(target_dt)]
+    where_clause = "s.signal_date = %s"
+
+    if include_prev_afterhours:
+        where_clause = "(s.signal_date = %s OR (s.signal_date = %s AND TIME(s.created_at) >= '16:00:00'))"
+        params = [str(target_dt), str(prev_dt)]
+
+    if ticker:
+        where_clause += " AND s.ticker = %s"
+        params.append(ticker.strip().upper())
+
+    query = f"""
     SELECT 
         s.signal_id,
         s.ticker,
@@ -249,11 +295,11 @@ def fetch_reactor_signals(target_date: str) -> List[ReactorSignal]:
     FROM signals s
     LEFT JOIN fundamental_analysis fa 
         ON s.fundamental_analysis_key = fa.entry_key
-    WHERE s.signal_date = %s
-    ORDER BY s.updated_at ASC;
+    WHERE {where_clause}
+    ORDER BY s.created_at ASC, s.updated_at ASC;
     """
-    
-    cursor.execute(query, (target_date,))
+
+    cursor.execute(query, tuple(params))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -283,117 +329,403 @@ def fetch_reactor_signals(target_date: str) -> List[ReactorSignal]:
 
 class MarketReactorStrategy(StrategyBaseplate):
     """
-    Lumibot Market Reactor Strategy.
-    Executes trades on market open according to Stock Alchemist signals,
-    applying Dual Hard Floor confidence filtering and 3-selector S/R + ATR bracket orders.
+    Upgraded Lumibot Market Reactor Strategy.
+    Features:
+    - 15-Minute Opening Range Breakout (ORB) confirmation for morning signals.
+    - Dynamic Intraday Catalyst Bar breakout for mid-session signals.
+    - Gap-to-ATR Exhaustion Guard (> 1.5x Daily ATR gap protection).
+    - Selector 1 (Macro Swing), Selector 2 (Momentum/Fade Scalp), Selector 3 (Directional Flow).
+    - Conviction-weighted position sizing (1.0% to 2.5% risk).
+    - Broker-managed bracket execution with EOD & breakeven ratchet management.
     """
 
     parameters = {
         **StrategyBaseplate.parameters,
         "Ticker": Asset(symbol="AAPL", asset_type=Asset.AssetType.STOCK),
-        "SignalDate": "2026-10-28",         # Date of news signals to trade
-        "MinConfidence": 0.70,              # Dual floor threshold
-        "RiskPct": 0.02,                   # 2% portfolio risk per trade
-        "TradingStyle": "swing_trading",   # "swing_trading" or "day_trading"
-        "MinRR": 1.5,                      # Minimum Risk-to-Reward ratio
-        "AllowOvernight": True,            # Hold positions overnight until TP/SL hits
+        "SignalDate": "2026-10-28",         # Fallback date if not dynamically tracking
+        "DynamicDateBinding": True,         # Automatically reload signals as simulation date rolls over
+        "EnforceNoLookahead": True,         # Only trade intraday signals at/after their created_at timestamp
+        "MinConfidence": 0.70,              # Dual hard floor threshold
+        "BaseRiskPct": 0.015,               # Base risk at 70% floor (scales up to MaxRiskPct)
+        "MaxRiskPct": 0.025,                # Max risk at 100% composite conviction
+        "MinRR": 1.5,                       # Minimum Risk-to-Reward ratio
+        "Selector2_Mode": "dynamic",        # "momentum", "fade", or "dynamic"
+        "Selector2_MinRVOL": 1.8,           # Minimum Relative Volume for Selector 2 momentum breakouts
+        "Selector3_MinRVOL": 1.3,           # Minimum Relative Volume for Selector 3 breakouts
+        "MaxGapATRMultiple": 1.5,           # Gap-to-ATR ratio that triggers Exhaustion Guard
+        "ORBMinutes": 15,                   # Opening Range duration (9:30 - 9:45 AM EST)
     }
 
     def initialize(self):
         super().initialize()
-        self.sleeptime = "5M"  # Evaluate every 5 minutes
-        self.signal_date_str = str(self.parameters.get("SignalDate", "2026-10-28"))
-        self.risk_pct = float(self.parameters.get("RiskPct", 0.02))
-        self.min_rr = float(self.parameters.get("MinRR", 1.5))
-        self.allow_overnight = bool(self.parameters.get("AllowOvernight", True))
+        self.sleeptime = "5M"
 
-        # Trade tracking
+        # Configuration parameters
+        self.dynamic_date_binding = bool(self.parameters.get("DynamicDateBinding", True))
+        self.enforce_no_lookahead = bool(self.parameters.get("EnforceNoLookahead", True))
+        self.base_risk_pct = float(self.parameters.get("BaseRiskPct", 0.015))
+        self.max_risk_pct = float(self.parameters.get("MaxRiskPct", 0.025))
+        self.min_rr = float(self.parameters.get("MinRR", 1.5))
+        self.selector2_mode = str(self.parameters.get("Selector2_Mode", "dynamic")).lower()
+        self.selector2_min_rvol = float(self.parameters.get("Selector2_MinRVOL", 1.8))
+        self.selector3_min_rvol = float(self.parameters.get("Selector3_MinRVOL", 1.3))
+        self.max_gap_atr = float(self.parameters.get("MaxGapATRMultiple", 1.5))
+        self.orb_minutes = int(self.parameters.get("ORBMinutes", 15))
+
+        # Trade tracker
         self.trade_tracker = TradeTracker(
             ticker=self.parameters["Ticker"].symbol,
             initial_cash=self.get_portfolio_value()
         )
-        self.active_trade_id = None
-        self.has_entered_for_signal = False
-        
-        # Load and resolve matching signal for this ticker
+        self.active_trade_id: Optional[str] = None
+        self.active_trade_selector: Optional[int] = None
+        self.active_entry_price: float = 0.0
+        self.active_initial_risk: float = 0.0
+        self.breakeven_ratchet_applied: bool = False
+
+        # Daily session state
+        self.current_session_date: Optional[date] = None
+        self.session_signals: List[ReactorSignal] = []
         self.matched_signal: Optional[ReactorSignal] = None
-        self._load_and_bind_signal()
+        self.traded_signal_ids: set = set()
 
-    def _load_and_bind_signal(self):
+        # Opening Range & Gap metrics for current session
+        self.or_high: Optional[float] = None
+        self.or_low: Optional[float] = None
+        self.open_930_price: Optional[float] = None
+        self.prev_close_price: Optional[float] = None
+        self.daily_atr: Optional[float] = None
+        self.gap_ratio: float = 0.0
+        self.is_exhausted_gap: bool = False
+
+        # Initial load for static SignalDate fallback
+        self.signal_date_str = str(self.parameters.get("SignalDate", "2026-10-28"))
+        self._load_signals_for_date(self.signal_date_str)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SESSION & SIGNAL BINDING
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _reset_daily_session_state(self, new_date: date):
+        """Resets intraday Opening Range and binds signals for the new trading day."""
+        self.current_session_date = new_date
+        self.or_high = None
+        self.or_low = None
+        self.open_930_price = None
+        self.prev_close_price = None
+        self.daily_atr = None
+        self.gap_ratio = 0.0
+        self.is_exhausted_gap = False
+        self.matched_signal = None
+
+        target_date_str = new_date.strftime("%Y-%m-%d") if self.dynamic_date_binding else self.signal_date_str
+        self._load_signals_for_date(target_date_str)
+
+    def _load_signals_for_date(self, target_date_str: str):
         ticker_sym = self.parameters["Ticker"].symbol
-        all_signals = fetch_reactor_signals(self.signal_date_str)
-        ticker_signals = [s for s in all_signals if s.ticker == ticker_sym]
+        all_signals = fetch_reactor_signals(
+            target_date=target_date_str,
+            ticker=ticker_sym,
+            include_prev_afterhours=True
+        )
 
-        if not ticker_signals:
-            self.log_message(f"[{ticker_sym}] No signals found for date {self.signal_date_str}.")
+        # Filter out signals that occurred after 16:00 EST on target_date (belong to tomorrow's open)
+        valid_session_signals: List[ReactorSignal] = []
+        for s in all_signals:
+            if s.raw_signal_id in self.traded_signal_ids:
+                continue
+            if self.enforce_no_lookahead and s.created_at is not None and s.signal_date == target_date_str:
+                if s.created_at.time() >= time(16, 0):
+                    continue
+            valid_session_signals.append(s)
+
+        self.session_signals = valid_session_signals
+        if not self.session_signals:
             return
 
-        # Pick the most recent signal for this ticker
-        sig = ticker_signals[-1]
-        self.matched_signal = sig
+        # Select latest eligible signal available right now (or pre-market)
+        eligible = [s for s in self.session_signals if s.is_eligible]
+        self.matched_signal = eligible[-1] if eligible else self.session_signals[-1]
 
+        sig = self.matched_signal
         status = "ELIGIBLE" if sig.is_eligible else "REJECTED (<70% dual floor)"
         self.log_message(
-            f"[{ticker_sym}] Loaded signal: {sig.signal_position} | "
-            f"Fund: {sig.fundamental_sentiment} (Conf: {sig.fundamental_confidence:.1%}) | "
-            f"News: {sig.news_sentiment} (Conv: {sig.news_conviction:.1%}) | "
+            f"[{ticker_sym}] Session {target_date_str} Signal: {sig.signal_position} | "
+            f"Fund: {sig.fundamental_sentiment} ({sig.fundamental_confidence:.1%}) | "
+            f"News: {sig.news_sentiment} ({sig.news_conviction:.1%}) | "
+            f"Composite: {sig.composite_conviction:.1%} | "
             f"Selector {sig.selector_id} ({sig.selector_name}, TF: {sig.sr_timeframe}) -> {status}"
         )
 
-    def _get_sr_levels(self, current_price: float, resolution: str) -> Tuple[float, float]:
+    def _get_available_signal(self, current_dt: datetime) -> Optional[ReactorSignal]:
         """
-        Calculates Support and Resistance levels for the target resolution (1H or 15m)
-        using the institutional Key Levels cluster engine.
+        Returns the highest-priority eligible signal that has already arrived by `current_dt`
+        and has not yet been traded.
         """
-        ticker_sym = self.parameters["Ticker"].symbol
+        eligible_now: List[ReactorSignal] = []
+        cur_date_str = current_dt.strftime("%Y-%m-%d")
+
+        for s in self.session_signals:
+            if not s.is_eligible or s.raw_signal_id in self.traded_signal_ids:
+                continue
+
+            if self.enforce_no_lookahead and s.created_at is not None:
+                # If created on the current session date, ensure current time >= created_at time
+                if s.signal_date == cur_date_str and current_dt.time() < s.created_at.time():
+                    continue
+
+            eligible_now.append(s)
+
+        if eligible_now:
+            self.matched_signal = eligible_now[-1]
+            return self.matched_signal
+        return None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # QUANTITATIVE METRICS: ATR, S/R, RVOL, OPENING RANGE & GAP GUARD
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_atr(self, resolution: str = "15m") -> float:
+        """Calculates 14-period ATR matched to the active Selector's timeframe."""
+        ticker = self.parameters["Ticker"]
+        lumibot_tf = "hour" if resolution in ("1H", "4H") else ("day" if resolution == "1D" else "15m")
         try:
-            res = analyze(ticker_sym, resolutions=[resolution], use_alpaca=False)
-            kl_df = res.key_levels
-            
-            if kl_df is not None and not kl_df.empty:
-                supports = kl_df[(kl_df['type'] == 'support') & (kl_df['level_price'] < current_price)]['level_price'].values
-                resistances = kl_df[(kl_df['type'] == 'resistance') & (kl_df['level_price'] > current_price)]['level_price'].values
-
-                sup = float(np.max(supports)) if len(supports) > 0 else current_price * 0.98
-                res_lvl = float(np.min(resistances)) if len(resistances) > 0 else current_price * 1.02
-                return sup, res_lvl
-        except Exception as e:
-            self.log_message(f"[{ticker_sym}] Error fetching key levels ({resolution}): {e}. Using fallback 2% buffer.")
-
-        # Fallback if no levels exist
-        return current_price * 0.98, current_price * 1.02
-
-    def _get_atr(self) -> float:
-        """Calculates 14-period ATR from recent market data."""
-        try:
-            bars = self.get_historical_prices(self.parameters["Ticker"], 30, "15m")
+            bars = self.get_historical_prices(ticker, 30, lumibot_tf)
             if bars is not None:
                 df = bars.df if hasattr(bars, "df") else bars
                 if not df.empty and len(df) >= 14:
-                    return calculate_atr(df, length=14)
+                    return float(calculate_atr(df, length=14))
         except Exception:
             pass
-        return self.get_last_price(self.parameters["Ticker"]) * 0.015
+        last_px = self.get_last_price(ticker) or 100.0
+        return float(last_px * (0.025 if lumibot_tf in ("hour", "day") else 0.012))
 
-    def get_position_sizing(self, entry_price: float, stop_loss: float) -> int:
-        """Sizes trade based on portfolio risk percentage."""
+    def _compute_daily_gap_metrics(self, current_price: float):
+        """Calculates 9:30 AM Opening Gap relative to 14-day Daily ATR."""
+        if self.open_930_price is not None:
+            return
+
+        self.open_930_price = current_price
+        ticker = self.parameters["Ticker"]
+        try:
+            daily_bars = self.get_historical_prices(ticker, 20, "day")
+            if daily_bars is not None:
+                df = daily_bars.df if hasattr(daily_bars, "df") else daily_bars
+                if not df.empty and len(df) >= 2:
+                    self.prev_close_price = float(df["close"].iloc[-2])
+                    self.daily_atr = float(calculate_atr(df, length=min(14, len(df) - 1)))
+                    if self.daily_atr > 0:
+                        self.gap_ratio = abs(self.open_930_price - self.prev_close_price) / self.daily_atr
+                        self.is_exhausted_gap = self.gap_ratio > self.max_gap_atr
+                        self.log_message(
+                            f"[{ticker.symbol}] Morning Gap Check: Open=${self.open_930_price:.2f}, "
+                            f"PrevClose=${self.prev_close_price:.2f}, 1D_ATR=${self.daily_atr:.2f} -> "
+                            f"Gap Ratio={self.gap_ratio:.2f}x ({'EXHAUSTED' if self.is_exhausted_gap else 'NORMAL'})"
+                        )
+        except Exception as e:
+            self.log_message(f"[{ticker.symbol}] Could not compute daily gap metrics: {e}")
+
+    def _update_opening_range(self):
+        """Computes the 9:30 - 9:45 AM EST Opening Range High and Low from 5m bars."""
+        if self.or_high is not None and self.or_low is not None:
+            return
+
+        ticker = self.parameters["Ticker"]
+        try:
+            bars = self.get_historical_prices(ticker, 10, "5m")
+            if bars is not None:
+                df = bars.df if hasattr(bars, "df") else bars
+                if not df.empty and self.current_session_date is not None:
+                    # Filter bars belonging to today's 09:30 - 09:45 window
+                    idx_dates = pd.to_datetime(df.index)
+                    today_mask = (idx_dates.date == self.current_session_date) & \
+                                 (idx_dates.time >= time(9, 30)) & \
+                                 (idx_dates.time < time(9, 30 + self.orb_minutes))
+                    or_df = df[today_mask]
+                    if not or_df.empty:
+                        self.or_high = float(or_df["high"].max())
+                        self.or_low = float(or_df["low"].min())
+                        self.log_message(
+                            f"[{ticker.symbol}] {self.orb_minutes}m Opening Range Locked: "
+                            f"OR_High=${self.or_high:.2f} | OR_Low=${self.or_low:.2f}"
+                        )
+                        return
+        except Exception:
+            pass
+
+        # Fallback if 5m bar slice unavailable
+        px = self.get_last_price(ticker)
+        if px:
+            self.or_high = px * 1.002
+            self.or_low = px * 0.998
+
+    def _get_rvol(self) -> float:
+        """Calculates current 5m/15m Relative Volume against the 20-bar rolling average."""
+        ticker = self.parameters["Ticker"]
+        try:
+            bars = self.get_historical_prices(ticker, 25, "5m")
+            if bars is not None:
+                df = bars.df if hasattr(bars, "df") else bars
+                if not df.empty and "volume" in df.columns and len(df) >= 10:
+                    avg_vol = float(df["volume"].iloc[:-1].tail(20).mean())
+                    cur_vol = float(df["volume"].iloc[-1])
+                    if avg_vol > 0:
+                        return round(cur_vol / avg_vol, 2)
+        except Exception:
+            pass
+        return 1.5  # Neutral fallback if volume feed unavailable
+
+    def _get_sr_levels(self, current_price: float, resolution: str, atr_val: float) -> Tuple[float, float, bool, bool]:
+        """
+        Calculates Support and Resistance levels for the target resolution ('1H' or '15m').
+        If price gaps beyond all historical S/R levels, projects dynamic ATR targets
+        instead of arbitrary 2% buffers.
+        Returns: (support, resistance, has_real_support, has_real_resistance)
+        """
+        ticker_sym = self.parameters["Ticker"].symbol
+        valid_res = resolution if resolution in ("1D", "4H", "1H", "15m", "5m") else "15m"
+
+        try:
+            res = analyze(ticker_sym, resolutions=[valid_res], use_alpaca=False)
+            kl_df = res.key_levels
+
+            if kl_df is not None and not kl_df.empty:
+                supports = kl_df[(kl_df["type"] == "support") & (kl_df["level_price"] < current_price)]["level_price"].values
+                resistances = kl_df[(kl_df["type"] == "resistance") & (kl_df["level_price"] > current_price)]["level_price"].values
+
+                has_sup = len(supports) > 0
+                has_res = len(resistances) > 0
+
+                # Dynamic ATR fallback if price gapped outside historical cluster range
+                sup = float(np.max(supports)) if has_sup else (self.or_low if (self.or_low and self.or_low < current_price) else current_price - (1.5 * atr_val))
+                res_lvl = float(np.min(resistances)) if has_res else current_price + (2.5 * atr_val)
+                return sup, res_lvl, has_sup, has_res
+        except Exception as e:
+            self.log_message(f"[{ticker_sym}] Key levels error ({valid_res}): {e}. Using ATR projection.")
+
+        return current_price - (1.5 * atr_val), current_price + (2.5 * atr_val), False, False
+
+    def get_position_sizing(self, entry_price: float, stop_loss: float, sig: ReactorSignal) -> int:
+        """
+        Conviction-weighted position sizing (1.0% to 2.5% risk),
+        halved automatically if Gap-to-ATR Exhaustion Guard is active.
+        """
         portfolio_val = self.get_portfolio_value()
-        risk_budget = portfolio_val * self.risk_pct
+
+        # Scale risk linearly from 0.70 floor -> BaseRiskPct up to 1.00 -> MaxRiskPct
+        conv_norm = max(0.0, min(1.0, (sig.composite_conviction - 0.70) / 0.30))
+        effective_risk_pct = self.base_risk_pct + conv_norm * (self.max_risk_pct - self.base_risk_pct)
+
+        if self.is_exhausted_gap:
+            effective_risk_pct *= 0.50
+
+        risk_budget = portfolio_val * effective_risk_pct
         risk_per_share = abs(entry_price - stop_loss)
-        
+
         if risk_per_share <= 0:
             return 0
-        
+
         qty = floor(risk_budget / risk_per_share)
         max_affordable = floor((portfolio_val * 0.95) / max(0.01, entry_price))
         return max(0, min(qty, max_affordable))
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # SELECTOR REGIME ENTRY EVALUATION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _evaluate_entry_trigger(
+        self,
+        sig: ReactorSignal,
+        current_price: float,
+        current_dt: datetime,
+        sup: float,
+        res: float,
+        atr_val: float
+    ) -> Tuple[bool, str, str]:
+        """
+        Evaluates whether the regime-specific entry conditions for Selectors 1, 2, or 3 are met.
+        Returns: (should_enter, resolved_trade_type ["BUY"|"SELL"], reason_note)
+        """
+        raw_dir = sig.signal_position  # "BUY" or "SELL" (always matches News direction)
+        rvol = self._get_rvol()
+
+        # Determine if this is an Intraday Arrival (> 09:30 EST) vs Morning ORB catalyst
+        is_intraday_catalyst = (
+            sig.created_at is not None
+            and self.current_session_date is not None
+            and sig.signal_date == self.current_session_date.strftime("%Y-%m-%d")
+            and sig.created_at.time() > time(9, 30)
+        )
+
+        # ── COHORT B: INTRADAY BREAKING CATALYST (09:30 - 15:25 EST) ─────────
+        if is_intraday_catalyst:
+            if current_dt.time() >= time(15, 25):
+                return False, raw_dir, "Intraday signal arrived too close to market close (>=15:25)"
+
+            # Wait at least 5 minutes after signal creation for initial spread stabilization
+            elapsed_mins = (current_dt - sig.created_at.replace(tzinfo=current_dt.tzinfo)).total_seconds() / 60.0
+            if elapsed_mins < 4.0:
+                return False, raw_dir, "Waiting for 5m intraday catalyst arrival bar to close"
+
+            if sig.selector_id in (2, 3) and rvol < self.selector3_min_rvol:
+                return False, raw_dir, f"Intraday RVOL ({rvol:.2f}) below threshold ({self.selector3_min_rvol})"
+
+            return True, raw_dir, f"Intraday Catalyst Confirmed (RVOL={rvol:.2f})"
+
+        # ── COHORT A: MORNING GAP / ORB CATALYST (Requires >= 09:45 EST) ─────
+        if self.or_high is None or self.or_low is None:
+            return False, raw_dir, "Opening Range not yet established"
+
+        # 1. SELECTOR 1: Macro Alignment (News + Fundamentals Agree)
+        if sig.selector_id == 1:
+            if raw_dir == "BUY":
+                # Enter on ORB breakout OR healthy pullback holding above OR_Low / 1H Support
+                if current_price >= self.or_high:
+                    return True, "BUY", "Selector 1 ORB High Breakout"
+                if not self.is_exhausted_gap and current_price > self.or_low and (current_price - self.or_low) <= 0.5 * atr_val:
+                    return True, "BUY", "Selector 1 Opening Range Support Hold"
+                return False, "BUY", "Price below OR_Low (Sell-the-news rejection)"
+            else:
+                if current_price <= self.or_low:
+                    return True, "SELL", "Selector 1 ORB Low Breakdown"
+                if not self.is_exhausted_gap and current_price < self.or_high and (self.or_high - current_price) <= 0.5 * atr_val:
+                    return True, "SELL", "Selector 1 Opening Range Resistance Hold"
+                return False, "SELL", "Price above OR_High (Short squeeze rejection)"
+
+        # 2. SELECTOR 2: Catalyst Momentum vs. Fundamental Fade
+        elif sig.selector_id == 2:
+            fundamental_dir = "SELL" if raw_dir == "BUY" else "BUY"
+
+            # Mode A: Momentum Scalp (in direction of News)
+            if self.selector2_mode in ("momentum", "dynamic"):
+                if raw_dir == "BUY" and current_price > self.or_high and rvol >= self.selector2_min_rvol and not self.is_exhausted_gap:
+                    return True, "BUY", f"Selector 2 Momentum Squeeze (ORB Break + RVOL {rvol:.2f})"
+                if raw_dir == "SELL" and current_price < self.or_low and rvol >= self.selector2_min_rvol and not self.is_exhausted_gap:
+                    return True, "SELL", f"Selector 2 Momentum Breakdown (ORB Break + RVOL {rvol:.2f})"
+
+            # Mode B: Fundamental Fade (when morning news spike stalls & breaks OR opposite boundary)
+            if self.selector2_mode in ("fade", "dynamic"):
+                if raw_dir == "BUY" and current_price < self.or_low:
+                    return True, "SELL", f"Selector 2 Fundamental Fade (Bullish news failed OR_Low -> {fundamental_dir})"
+                if raw_dir == "SELL" and current_price > self.or_high:
+                    return True, "BUY", f"Selector 2 Fundamental Fade (Bearish news squeezed above OR_High -> {fundamental_dir})"
+
+            return False, raw_dir, f"Selector 2 waiting for ORB confirmation (Mode={self.selector2_mode}, RVOL={rvol:.2f})"
+
+        # 3. SELECTOR 3: Directional Flow (Neutral Fundamentals)
+        else:
+            if raw_dir == "BUY" and current_price >= self.or_high and rvol >= self.selector3_min_rvol:
+                return True, "BUY", f"Selector 3 Volume-Confirmed ORB Breakout (RVOL={rvol:.2f})"
+            if raw_dir == "SELL" and current_price <= self.or_low and rvol >= self.selector3_min_rvol:
+                return True, "SELL", f"Selector 3 Volume-Confirmed ORB Breakdown (RVOL={rvol:.2f})"
+
+            return False, raw_dir, f"Selector 3 awaiting ORB break with RVOL >= {self.selector3_min_rvol} (cur={rvol:.2f})"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MAIN TRADING LOOP
+    # ─────────────────────────────────────────────────────────────────────────
+
     def on_trading_iteration(self):
-        """
-        Primary execution loop:
-        1. On market open, if signal is eligible and not yet entered, submit bracket order.
-        2. Monitor active trade for TP/SL trigger.
-        """
         ticker = self.parameters["Ticker"]
         ticker_sym = ticker.symbol
         current_price = self.get_last_price(ticker)
@@ -402,63 +734,108 @@ class MarketReactorStrategy(StrategyBaseplate):
         if current_price is None or current_price <= 0:
             return
 
-        # ── 1. CHECK IF POSITION IS OPEN & MONITOR EXITS ─────────────────
-        position = self.get_position(ticker)
-        if position is not None and position.quantity != 0:
-            if self.active_trade_id and self.active_trade_id in self.trade_tracker.trades:
-                trade = self.trade_tracker.trades[self.active_trade_id]
-                
-                # Check Take Profit
-                if (trade.trade_type == "BUY" and current_price >= trade.take_profit) or \
-                   (trade.trade_type == "SELL" and current_price <= trade.take_profit):
-                    self.log_message(f"[{ticker_sym}] TAKE PROFIT HIT @ ${current_price:.2f} (Target: ${trade.take_profit:.2f})")
-                    self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "TP")
-                    self._close_all_positions()
-                    self.active_trade_id = None
-                    return
+        # ── 0. DAILY ROLLOVER & SESSION INITIALIZATION ───────────────────────
+        if self.current_session_date != current_dt.date():
+            self._reset_daily_session_state(current_dt.date())
 
-                # Check Stop Loss
+        current_time = current_dt.time()
+        if current_time >= time(9, 30):
+            self._compute_daily_gap_metrics(current_price)
+        if current_time >= time(9, 30 + self.orb_minutes):
+            self._update_opening_range()
+
+        # ── 1. SYNC BROKER BRACKET EXITS & MANAGE OPEN POSITIONS ─────────────
+        position = self.get_position(ticker)
+        has_open_pos = position is not None and position.quantity != 0
+
+        # Detect if broker bracket order (TP or SL) filled since last iteration
+        if not has_open_pos and self.active_trade_id is not None:
+            if self.active_trade_id in self.trade_tracker.trades:
+                trade = self.trade_tracker.trades[self.active_trade_id]
+                if trade.is_open:
+                    dist_tp = abs(current_price - trade.take_profit)
+                    dist_sl = abs(current_price - trade.stop_loss)
+                    exit_reason = "TP" if dist_tp <= dist_sl else "SL"
+                    exit_px = trade.take_profit if exit_reason == "TP" else trade.stop_loss
+                    self.log_message(f"[{ticker_sym}] Bracket {exit_reason} filled @ ~${exit_px:.2f}")
+                    self.trade_tracker.close_trade(self.active_trade_id, current_dt, exit_px, exit_reason)
+            self.active_trade_id = None
+            self.active_trade_selector = None
+            self.breakeven_ratchet_applied = False
+
+        # Active Position Management (EOD Rules & Breakeven Ratchet)
+        if has_open_pos and self.active_trade_id in self.trade_tracker.trades:
+            trade = self.trade_tracker.trades[self.active_trade_id]
+            signed_pnl_per_share = (current_price - trade.entry_price) if trade.trade_type == "BUY" else (trade.entry_price - current_price)
+            current_r_mult = (signed_pnl_per_share / self.active_initial_risk) if self.active_initial_risk > 0 else 0.0
+
+            # Selector 2: Strict Intraday Flatten at 15:55 EST
+            if self.active_trade_selector == 2 and current_time >= time(15, 55):
+                self.log_message(f"[{ticker_sym}] Selector 2 Hard EOD Flatten @ ${current_price:.2f} ({current_r_mult:+.2f}R)")
+                self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "EOD_SEL2")
+                self._close_all_positions()
+                return
+
+            # Selector 3: Conditional Overnight Check at 15:50 EST (Require >= +0.5R)
+            if self.active_trade_selector == 3 and current_time >= time(15, 50) and current_r_mult < 0.50:
+                self.log_message(
+                    f"[{ticker_sym}] Selector 3 EOD Flatten @ ${current_price:.2f} "
+                    f"(Unrealized {current_r_mult:+.2f}R < +0.50R overnight threshold)"
+                )
+                self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "EOD_SEL3_WEAK")
+                self._close_all_positions()
+                return
+
+            # Selector 1: Ratchet internal stop to Breakeven once trade reaches +1.5R
+            if self.active_trade_selector == 1 and not self.breakeven_ratchet_applied and current_r_mult >= 1.50:
+                trade.stop_loss = trade.entry_price
+                self.breakeven_ratchet_applied = True
+                self.log_message(f"[{ticker_sym}] Selector 1 reached +1.5R -> Stop loss ratcheted to breakeven (${trade.entry_price:.2f})")
+
+            # Enforce ratcheted breakeven stop if price pulls back
+            if self.breakeven_ratchet_applied:
                 if (trade.trade_type == "BUY" and current_price <= trade.stop_loss) or \
                    (trade.trade_type == "SELL" and current_price >= trade.stop_loss):
-                    self.log_message(f"[{ticker_sym}] STOP LOSS HIT @ ${current_price:.2f} (Stop: ${trade.stop_loss:.2f})")
-                    self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "SL")
+                    self.log_message(f"[{ticker_sym}] Breakeven Stop Triggered @ ${current_price:.2f}")
+                    self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "BE_STOP")
                     self._close_all_positions()
-                    self.active_trade_id = None
-                    return
             return
 
-        # ── 2. NEW ENTRY EVALUATION ON MARKET OPEN ────────────────────────
-        if self.has_entered_for_signal or not self.matched_signal or not self.matched_signal.is_eligible:
+        # ── 2. NEW ENTRY EVALUATION ──────────────────────────────────────────
+        # Wait until Opening Range completes at 9:45 AM EST (and don't open new trades after 15:30 EST)
+        if current_time < time(9, 30 + self.orb_minutes) or current_time >= time(15, 30):
             return
 
-        # Ensure we execute at/after 9:30 AM EST
-        current_time = current_dt.time()
-        if current_time < time(9, 30):
+        sig = self._get_available_signal(current_dt)
+        if sig is None:
             return
 
-        sig = self.matched_signal
-        trade_type = sig.signal_position  # "BUY" or "SELL"
-        side = "buy" if trade_type == "BUY" else "sell"
+        atr_val = self._get_atr(sig.resolution_code)
+        sup, res, _, _ = self._get_sr_levels(current_price, sig.resolution_code, atr_val)
 
-        # Calculate S/R based on Selector Timeframe
-        sup, res = self._get_sr_levels(current_price, sig.resolution_code)
-        atr_val = self._get_atr()
+        should_enter, resolved_trade_type, entry_note = self._evaluate_entry_trigger(
+            sig=sig,
+            current_price=current_price,
+            current_dt=current_dt,
+            sup=sup,
+            res=res,
+            atr_val=atr_val
+        )
 
-        # Define raw TP/SL from S/R
-        if trade_type == "BUY":
-            raw_sl = sup
-            raw_tp = res
-        else:
-            raw_sl = res
-            raw_tp = sup
+        if not should_enter:
+            return
 
-        # Pass raw levels through StrategyBaseplate ATR optimization
+        side = "buy" if resolved_trade_type == "BUY" else "sell"
+        raw_sl = sup if resolved_trade_type == "BUY" else res
+        raw_tp = res if resolved_trade_type == "BUY" else sup
+
+        # Optimize SL/TP using Selector-specific TradingStyle & ATR
         risk_levels = self.optimize_sl_tp(
             entry_price=current_price,
             stop_loss=raw_sl,
             take_profit=raw_tp,
             side=side,
-            trading_style=self.parameters.get("TradingStyle", "swing_trading"),
+            trading_style=sig.trading_style,
             atr=atr_val,
             risk_reward_ratio=self.min_rr
         )
@@ -466,20 +843,19 @@ class MarketReactorStrategy(StrategyBaseplate):
         final_sl = risk_levels.stop_loss
         final_tp = risk_levels.take_profit
 
-        # Position Sizing
-        quantity = self.get_position_sizing(current_price, final_sl)
+        quantity = self.get_position_sizing(current_price, final_sl, sig)
         if quantity <= 0:
-            self.log_message(f"[{ticker_sym}] Position sizing resulted in 0 shares. Skipping entry.")
+            self.log_message(f"[{ticker_sym}] Position sizing resulted in 0 shares. Skipping signal {sig.raw_signal_id}.")
+            self.traded_signal_ids.add(sig.raw_signal_id)
             return
 
-        # Execute Entry Order
         self.log_message(
-            f"[{ticker_sym}] EXECUTING {trade_type} | Qty: {quantity} @ ${current_price:.2f} | "
-            f"SL: ${final_sl:.2f} | TP: ${final_tp:.2f} | R:R: {risk_levels.risk_reward_ratio:.2f} | "
+            f"[{ticker_sym}] EXECUTING {resolved_trade_type} ({entry_note}) | "
+            f"Qty: {quantity} @ ${current_price:.2f} | SL: ${final_sl:.2f} | TP: ${final_tp:.2f} | "
+            f"R:R: {risk_levels.risk_reward_ratio:.2f} | Style: {sig.trading_style} | "
             f"Selector {sig.selector_id} ({sig.selector_name}, TF: {sig.sr_timeframe})"
         )
 
-        # Record in TradeTracker
         self.active_trade_id = self.trade_tracker.open_trade(
             date=current_dt,
             entry_price=current_price,
@@ -488,10 +864,14 @@ class MarketReactorStrategy(StrategyBaseplate):
             stop_loss=final_sl,
             support_level=sup,
             resistance_level=res,
-            trade_type=trade_type
+            trade_type=resolved_trade_type
         )
+        self.active_trade_selector = sig.selector_id
+        self.active_entry_price = current_price
+        self.active_initial_risk = abs(current_price - final_sl)
+        self.breakeven_ratchet_applied = False
+        self.traded_signal_ids.add(sig.raw_signal_id)
 
-        # Submit Lumibot bracket order
         order = self.create_order(
             ticker,
             quantity,
@@ -501,7 +881,6 @@ class MarketReactorStrategy(StrategyBaseplate):
             type="market"
         )
         self.submit_order(order)
-        self.has_entered_for_signal = True
 
     def on_strategy_end(self):
         """Cleanly liquidate or finalize open trades at end of simulation."""
@@ -516,14 +895,18 @@ class MarketReactorStrategy(StrategyBaseplate):
                 self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "END_SIM")
                 self._close_all_positions()
 
-        # Log tracker summary
         perf = self.trade_tracker.get_performance_summary()
         self.log_message(f"[{ticker.symbol}] Performance Summary: {perf}")
 
     def _close_all_positions(self):
+        """Cancels working bracket legs before flattening to prevent orphan fills."""
+        self.cancel_open_orders()
         ticker = self.parameters["Ticker"]
         position = self.get_position(ticker)
         if position is not None and position.quantity != 0:
             side = "sell" if position.quantity > 0 else "buy"
             order = self.create_order(ticker, abs(position.quantity), side, type="market")
             self.submit_order(order)
+        self.active_trade_id = None
+        self.active_trade_selector = None
+        self.breakeven_ratchet_applied = False
