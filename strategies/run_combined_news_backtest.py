@@ -46,13 +46,15 @@ def simulate_strategy_engine(
     date_list: List[str],
     all_eligible_signals: List[Tuple[str, ReactorSignal]],
     ticker_data_map: Dict[str, pd.DataFrame],
+    all_market_dates: Optional[List[str]] = None,
     initial_portfolio: float = 100000.0,
     risk_pct: float = 0.02
 ) -> Dict[str, Any]:
     """
     Simulates a specific technical engine gated by news direction over multiple days.
+    Accurately carries active positions overnight across all market trading sessions.
     """
-    sorted_dates = sorted(date_list)
+    sorted_dates = sorted(all_market_dates) if all_market_dates else sorted(date_list)
     active_positions: Dict[str, Dict[str, Any]] = {}
     completed_trades: List[Dict[str, Any]] = []
 
@@ -80,14 +82,19 @@ def simulate_strategy_engine(
                 entry_price = open_price
                 entry_time = open_time
 
-                # Determine S/R & ATR
+                # Determine S/R & ATR based on selector timeframe
                 atr_val = calculate_atr(df[df.index <= entry_time], length=14) or (entry_price * 0.015)
-                try:
-                    prior_bars = df[df.index.date < curr_date]
-                    sup = float(prior_bars["low"].min()) if not prior_bars.empty else entry_price * 0.98
-                    res = float(prior_bars["high"].max()) if not prior_bars.empty else entry_price * 1.02
-                except Exception:
-                    sup, res = entry_price * 0.98, entry_price * 1.02
+                tf = getattr(sig, "sr_timeframe", "1H")
+                prior_bars = df[df.index < entry_time]
+                if tf == "15m":
+                    recent_bars = prior_bars.tail(16)
+                elif tf == "30m":
+                    recent_bars = prior_bars.tail(28)
+                else:  # 1H
+                    recent_bars = prior_bars.tail(40)
+
+                sup = float(recent_bars["low"].min()) if not recent_bars.empty else entry_price * 0.98
+                res = float(recent_bars["high"].max()) if not recent_bars.empty else entry_price * 1.02
 
                 side = "buy" if allowed_side == "BUY" else "sell"
                 raw_sl = sup if allowed_side == "BUY" else res
@@ -116,22 +123,22 @@ def simulate_strategy_engine(
 
             # ── 2. ENGINE 2: NEWS + MULTI-TIMEFRAME KEY LEVELS & FIBONACCI ──
             elif strategy_name == "News_MTF_KeyLevels":
-                # Compute multi-TF levels
-                prior_df = df[df.index.date <= curr_date]
-                if len(prior_df) < 30:
+                # Compute multi-TF levels up to market open
+                prior_df = df[df.index < open_time]
+                if len(prior_df) < 20:
                     continue
 
                 atr_val = calculate_atr(prior_df, length=14) or (open_price * 0.015)
                 atr_buf = atr_val * 0.5
 
-                # Generate 1D, 4H, 15m levels
+                # Generate 1D, 15m levels
                 df_1d = prior_df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
                 df_15m = prior_df.resample("15min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
 
                 found_levels = []
-                for tf, r_df in [("1D", df_1d), ("15m", df_15m)]:
+                for tf_code, r_df in [("1D", df_1d), ("15m", df_15m)]:
                     if len(r_df) >= 10:
-                        l = find_key_levels(r_df, resolution=tf)
+                        l = find_key_levels(r_df, resolution=tf_code)
                         if not l.empty:
                             found_levels.append(l)
 
@@ -190,12 +197,17 @@ def simulate_strategy_engine(
 
             # ── 3. ENGINE 3: NEWS + LIQUIDITY SWEEP ──────────────────────────
             elif strategy_name == "News_LiquiditySweep":
-                prior_df = df[df.index.date < curr_date]
-                if prior_df.empty:
+                prior_dates = sorted(list(set(df[df.index.date < curr_date].index.date)))
+                if not prior_dates:
                     continue
 
-                pdh = float(prior_df["high"].max())
-                pdl = float(prior_df["low"].min())
+                last_d = prior_dates[-1]
+                prev_day_bars = df[df.index.date == last_d]
+                if prev_day_bars.empty:
+                    continue
+
+                pdh = float(prev_day_bars["high"].max())
+                pdl = float(prev_day_bars["low"].min())
                 atr_val = calculate_atr(df[df.index <= open_time], length=14) or (open_price * 0.015)
                 atr_buf = atr_val * 0.5
 
@@ -379,17 +391,26 @@ def simulate_strategy_engine(
     }
 
 
-def run_comparative_backtest(period_mode: str = "both"):
+def run_comparative_backtest(period_mode: str = "month"):
     periods = []
-    if period_mode in ("oct_week", "both"):
+    if period_mode in ("month", "1month", "all"):
+        month_dates = [
+            "2026-09-29", "2026-09-30", "2026-10-01",
+            "2026-10-14", "2026-10-15", "2026-10-16",
+            "2026-10-19", "2026-10-20", "2026-10-28", "2026-10-29"
+        ]
+        periods.append(("Full 1-Month Period (Sep 29 - Oct 29, 2026)", month_dates, 8))
+    if period_mode in ("oct_week", "both", "all"):
         periods.append(("Full 5-Day Trading Week", ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"], 10))
-    if period_mode in ("recent_week", "both"):
+    if period_mode in ("recent_week", "both", "all"):
         periods.append(("Recent Calendar Week", ["2026-10-28", "2026-10-29"], 15))
 
+    initial_portfolio = 100000.0
+
     for period_title, date_list, max_per_day in periods:
-        print("\n" + "=" * 95)
+        print("\n" + "=" * 105)
         print(f" EXECUTING COMPARATIVE EVALUATION: {period_title} ({date_list[0]} to {date_list[-1]})")
-        print("=" * 95)
+        print("=" * 105)
 
         # Ingest eligible signals
         all_eligible: List[Tuple[str, ReactorSignal]] = []
@@ -405,52 +426,119 @@ def run_comparative_backtest(period_mode: str = "both"):
         unique_tickers = list(dict.fromkeys([s.ticker for _, s in all_eligible]))
         print(f"Total Eligible News Signals: {len(all_eligible)} | Unique Tickers: {len(unique_tickers)}")
 
-        # Fetch market data
-        start_dt = pd.to_datetime(date_list[0]) - timedelta(days=5)
+        # Batch download market data including SPY and QQQ benchmarks
+        all_syms = list(unique_tickers) + ["SPY", "QQQ"]
+        start_dt = pd.to_datetime(date_list[0]) - timedelta(days=14)
         end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=2)
-        print(f"Downloading market data for {len(unique_tickers)} tickers...")
+        print(f"Downloading market data for {len(all_syms)} tickers (including SPY & QQQ benchmarks)...")
 
         ticker_data_map: Dict[str, pd.DataFrame] = {}
-        for ticker in unique_tickers:
-            try:
-                df = yf.download(ticker, start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="15m", progress=False)
-                if not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = [c[0].lower() for c in df.columns]
-                    else:
-                        df.columns = [c.lower() for c in df.columns]
-                    if df.index.tz is not None:
-                        df.index = df.index.tz_convert("America/New_York")
-                    else:
-                        df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
-                    ticker_data_map[ticker] = df
-            except Exception:
-                pass
+        try:
+            raw_batch = yf.download(
+                all_syms,
+                start=start_dt.strftime("%Y-%m-%d"),
+                end=end_dt.strftime("%Y-%m-%d"),
+                interval="15m",
+                group_by="ticker",
+                progress=False
+            )
+            for ticker in all_syms:
+                if len(all_syms) == 1:
+                    sub = raw_batch.copy()
+                elif hasattr(raw_batch.columns, "levels") and ticker in raw_batch.columns.levels[0]:
+                    sub = raw_batch[ticker].dropna(how="all").copy()
+                elif ticker in raw_batch:
+                    sub = raw_batch[ticker].dropna(how="all").copy()
+                else:
+                    continue
 
-        print(f"Data ready for {len(ticker_data_map)} tickers. Running simulations across 3 engines...")
+                if not sub.empty:
+                    sub.columns = [c.lower() for c in sub.columns]
+                    if sub.index.tz is not None:
+                        sub.index = sub.index.tz_convert("America/New_York")
+                    else:
+                        sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
+                    ticker_data_map[ticker] = sub
+        except Exception as e:
+            print(f"Batch download warning: {e}. Falling back to sequential download.")
+            for ticker in all_syms:
+                try:
+                    df = yf.download(ticker, start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="15m", progress=False)
+                    if not df.empty:
+                        df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
+                        if df.index.tz is not None:
+                            df.index = df.index.tz_convert("America/New_York")
+                        else:
+                            df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
+                        ticker_data_map[ticker] = df
+                except Exception:
+                    pass
+
+        print(f"Data ready for {len(ticker_data_map)} assets. Extracting full continuous trading schedule...")
+
+        # Extract all continuous trading days in period from SPY or first asset
+        all_market_dates = []
+        ref_df = ticker_data_map.get("SPY", next(iter(ticker_data_map.values()), None))
+        if ref_df is not None and not ref_df.empty:
+            period_df = ref_df[(ref_df.index.strftime("%Y-%m-%d") >= date_list[0]) & (ref_df.index.strftime("%Y-%m-%d") <= date_list[-1])]
+            all_market_dates = sorted(list(set(period_df.index.strftime("%Y-%m-%d"))))
+        if not all_market_dates:
+            all_market_dates = sorted(date_list)
+
+        print(f"Total Market Trading Sessions in period: {len(all_market_dates)} days.")
+        print(f"Running simulations across 3 technical engines + Buy & Hold benchmarks...")
 
         results = []
         # Run 1: Market Reactor Baseline
-        res_mr = simulate_strategy_engine("MarketReactor", date_list, all_eligible, ticker_data_map)
+        res_mr = simulate_strategy_engine(
+            "MarketReactor", date_list, all_eligible, ticker_data_map,
+            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio
+        )
         results.append(res_mr)
 
         # Run 2: News + MultiTimeframe Key Levels & Fib
-        res_mtf = simulate_strategy_engine("News_MTF_KeyLevels", date_list, all_eligible, ticker_data_map)
+        res_mtf = simulate_strategy_engine(
+            "News_MTF_KeyLevels", date_list, all_eligible, ticker_data_map,
+            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio
+        )
         results.append(res_mtf)
 
         # Run 3: News + Liquidity Sweep
-        res_swp = simulate_strategy_engine("News_LiquiditySweep", date_list, all_eligible, ticker_data_map)
+        res_swp = simulate_strategy_engine(
+            "News_LiquiditySweep", date_list, all_eligible, ticker_data_map,
+            all_market_dates=all_market_dates, initial_portfolio=initial_portfolio
+        )
         results.append(res_swp)
 
-        # Format comparison table
-        print("\n" + "=" * 95)
+        # Calculate Buy & Hold Benchmarks ($100k allocation each)
+        benchmarks = []
+        for b_sym, b_name in [("SPY", "SPY (S&P 500 ETF)"), ("QQQ", "NASDAQ 100 (QQQ ETF)")]:
+            if b_sym in ticker_data_map and not ticker_data_map[b_sym].empty:
+                b_df = ticker_data_map[b_sym]
+                p_df = b_df[(b_df.index.strftime("%Y-%m-%d") >= date_list[0]) & (b_df.index.strftime("%Y-%m-%d") <= date_list[-1])]
+                if not p_df.empty:
+                    s_price = float(p_df.iloc[0]["open"])
+                    e_price = float(p_df.iloc[-1]["close"])
+                    b_ret = (e_price - s_price) / s_price
+                    b_pnl = initial_portfolio * b_ret
+                    benchmarks.append({
+                        "symbol": b_sym,
+                        "name": b_name,
+                        "start_price": s_price,
+                        "end_price": e_price,
+                        "return_pct": b_ret,
+                        "pnl": b_pnl
+                    })
+
+        # Format side-by-side performance table
+        print("\n" + "=" * 105)
         print(f" SIDE-BY-SIDE PERFORMANCE MATRIX — {period_title.upper()}")
-        print("=" * 95)
+        print("=" * 105)
 
         summary_rows = []
         for r in results:
             summary_rows.append({
-                "Strategy": r["strategy"],
+                "Strategy / Benchmark": r["strategy"],
                 "Total Trades": r["total_trades"],
                 "Closed": r["closed_trades"],
                 "Open": r["open_trades"],
@@ -462,8 +550,38 @@ def run_comparative_backtest(period_mode: str = "both"):
                 "Return %": f"{r['return_pct']:+.2%}"
             })
 
+        for b in benchmarks:
+            summary_rows.append({
+                "Strategy / Benchmark": f"Buy & Hold: {b['name']}",
+                "Total Trades": 1,
+                "Closed": 0,
+                "Open": 1,
+                "Win Rate": "100.0%" if b["pnl"] > 0 else "0.0%",
+                "Profit Factor": "N/A",
+                "Closed P&L": "$0.00",
+                "Open P&L": f"${b['pnl']:+,.2f}",
+                "Total Net P&L": f"${b['pnl']:+,.2f}",
+                "Return %": f"{b['return_pct']:+.2%}"
+            })
+
         df_summary = pd.DataFrame(summary_rows)
         print(df_summary.to_string(index=False))
+
+        # Alpha Outperformance Summary
+        if benchmarks:
+            spy_b = next((b for b in benchmarks if b["symbol"] == "SPY"), None)
+            qqq_b = next((b for b in benchmarks if b["symbol"] == "QQQ"), None)
+            print("\n" + "-" * 105)
+            print(" OUTPERFORMANCE (ALPHA) RELATIVE TO $100K BENCHMARKS:")
+            print("-" * 105)
+            for r in results:
+                strat_ret = r["return_pct"]
+                strat_pnl = r["net_pnl"]
+                spy_alpha = (strat_ret - spy_b["return_pct"]) if spy_b else 0.0
+                qqq_alpha = (strat_ret - qqq_b["return_pct"]) if qqq_b else 0.0
+                spy_diff_pnl = (strat_pnl - spy_b["pnl"]) if spy_b else 0.0
+                qqq_diff_pnl = (strat_pnl - qqq_b["pnl"]) if qqq_b else 0.0
+                print(f" • {r['strategy']:<25}: vs SPY: {spy_alpha:+.2%} (${spy_diff_pnl:+,.2f}) | vs NASDAQ: {qqq_alpha:+.2%} (${qqq_diff_pnl:+,.2f})")
 
         # Save to logs
         os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
@@ -473,5 +591,5 @@ def run_comparative_backtest(period_mode: str = "both"):
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "both"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "month"
     run_comparative_backtest(period_mode=mode)
