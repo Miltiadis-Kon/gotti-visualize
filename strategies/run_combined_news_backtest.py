@@ -229,66 +229,138 @@ def simulate_strategy_engine(
                     continue
 
                 atr_val = calculate_atr(prior_df, length=14) or (open_price * 0.015)
-                atr_buf = atr_val * 0.5
+                atr_buf = atr_val * 1.0  # 1.0x 15m ATR buffer matching updated strategy
 
                 df_1d = prior_df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+                df_1h = prior_df.resample("1h").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
                 df_15m = prior_df.resample("15min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
 
                 found_levels = []
-                for tf_code, r_df in [("1D", df_1d), ("15m", df_15m)]:
+                for tf_code, r_df in [("1D", df_1d), ("1H", df_1h), ("15m", df_15m)]:
                     if len(r_df) >= 10:
                         l = find_key_levels(r_df, resolution=tf_code)
                         if not l.empty:
                             found_levels.append(l)
 
                 merged_l = merge_key_levels(pd.concat(found_levels, ignore_index=True)) if found_levels else pd.DataFrame()
+                all_levels = np.sort(merged_l["level_price"].unique()) if not merged_l.empty else np.array([])
                 sups = merged_l[merged_l["type"] == "support"].sort_values("level_price", ascending=False) if not merged_l.empty else pd.DataFrame()
                 resists = merged_l[merged_l["type"] == "resistance"].sort_values("level_price", ascending=True) if not merged_l.empty else pd.DataFrame()
 
-                fib_setups = get_fibonacci_trade_setups(df_15m, resolution="15m", backcandles=30) if len(df_15m) >= 15 else pd.DataFrame()
+                # Fibonacci setups across 1D, 1H, 15m
+                fib_list = []
+                for tf_label, r_df in [("1D", df_1d), ("1H", df_1h), ("15m", df_15m)]:
+                    if len(r_df) >= 15:
+                        s = get_fibonacci_trade_setups(r_df, resolution=tf_label, backcandles=min(35, len(r_df) - 2))
+                        if not s.empty:
+                            fib_list.append(s)
+                fib_setups = pd.concat(fib_list, ignore_index=True) if fib_list else pd.DataFrame()
 
                 allowed_side = sig.signal_position
-                for idx in range(len(day_candles)):
+                for idx in range(1, len(day_candles)):
                     bar = day_candles.iloc[idx]
-                    p = float(bar["close"])
+                    prev_b = day_candles.iloc[idx - 1]
                     t = bar.name
+                    p = float(bar["close"])
+                    b_open = float(bar["open"])
+                    prev_close = float(prev_b["close"])
 
-                    matched = False
-                    if not fib_setups.empty:
+                    is_bullish = (p > b_open) and (p >= prev_close)
+                    is_bearish = (p < b_open) and (p <= prev_close)
+
+                    # Opening Range boundary guard: never buy below or_low or short above or_high
+                    if allowed_side == "BUY" and or_low is not None and p < or_low:
+                        continue
+                    if allowed_side == "SELL" and or_high is not None and p > or_high:
+                        continue
+
+                    v = float(bar["volume"])
+                    avg_v = vol_ma.iloc[idx] if not np.isnan(vol_ma.iloc[idx]) else v
+                    rvol = (v / avg_v) if avg_v > 0 else 1.3
+
+                    entry_setup = None
+
+                    # Setup 1: MTF S/R Flip Breakout (RVOL >= 1.25)
+                    if len(all_levels) > 0 and rvol >= 1.25:
+                        if allowed_side == "BUY" and is_bullish:
+                            below = all_levels[all_levels <= p]
+                            above = all_levels[all_levels > p + (0.5 * atr_val)]
+                            if len(below) > 0:
+                                flipped = float(below[-1])
+                                if 0 <= (p - flipped) <= (flipped * 0.008):
+                                    sl = flipped - atr_buf
+                                    tp = float(above[0]) if len(above) > 0 else p + (2.5 * atr_val)
+                                    if (tp - p) / max(0.01, p - sl) >= 1.6:
+                                        entry_setup = ("BUY", p, sl, tp, "MTF_SR_FLIP_BREAKOUT")
+                        elif allowed_side == "SELL" and is_bearish:
+                            above = all_levels[all_levels >= p]
+                            below = all_levels[all_levels < p - (0.5 * atr_val)]
+                            if len(above) > 0:
+                                flipped = float(above[0])
+                                if 0 <= (flipped - p) <= (flipped * 0.008):
+                                    sl = flipped + atr_buf
+                                    tp = float(below[-1]) if len(below) > 0 else p - (2.5 * atr_val)
+                                    if (p - tp) / max(0.01, sl - p) >= 1.6:
+                                        entry_setup = ("SELL", p, sl, tp, "MTF_SR_FLIP_BREAKDOWN")
+
+                    # Setup 2: Confirmed Fibonacci 0.618 Retracement
+                    if entry_setup is None and not fib_setups.empty:
                         for _, f_row in fib_setups.iterrows():
-                            f_side = "BUY" if f_row["trend"] == "uptrend" else "SELL"
-                            if f_side == allowed_side and abs(p - float(f_row["entry_price"])) <= (float(f_row["entry_price"]) * 0.006):
-                                raw_sl = float(f_row["stop_loss"])
-                                raw_tp = float(f_row["take_profit"])
-                                sl_price = raw_sl - atr_buf if f_side == "BUY" else raw_sl + atr_buf
-                                tp_price = raw_tp
-                                matched = True
-                                break
+                            f_side = "BUY" if str(f_row["trend"]).lower() == "uptrend" else "SELL"
+                            if f_side != allowed_side:
+                                continue
+                            f_entry = float(f_row["entry_price"])
+                            if abs(p - f_entry) <= (f_entry * 0.006):
+                                if f_side == "BUY" and is_bullish and p >= f_entry:
+                                    raw_sl = min(float(f_row["stop_loss"]), p - atr_buf)
+                                    raw_tp = float(f_row["take_profit"])
+                                    if raw_tp > p and (raw_tp - p) / max(0.01, p - raw_sl) >= 1.6:
+                                        entry_setup = ("BUY", p, raw_sl, raw_tp, "FIB_0.618_CONFIRMED")
+                                        break
+                                elif f_side == "SELL" and is_bearish and p <= f_entry:
+                                    raw_sl = max(float(f_row["stop_loss"]), p + atr_buf)
+                                    raw_tp = float(f_row["take_profit"])
+                                    if raw_tp < p and (p - raw_tp) / max(0.01, raw_sl - p) >= 1.6:
+                                        entry_setup = ("SELL", p, raw_sl, raw_tp, "FIB_0.618_CONFIRMED")
+                                        break
 
-                    if not matched:
-                        if allowed_side == "BUY" and not sups.empty:
-                            nearest_s = float(sups.iloc[0]["level_price"])
-                            if abs(p - nearest_s) <= (nearest_s * 0.006):
-                                sl_price = nearest_s - atr_buf
-                                tp_price = float(resists.iloc[0]["level_price"]) if not resists.empty else p + (atr_val * 2.0)
-                                matched = True
-                        elif allowed_side == "SELL" and not resists.empty:
-                            nearest_r = float(resists.iloc[0]["level_price"])
-                            if abs(p - nearest_r) <= (nearest_r * 0.006):
-                                sl_price = nearest_r + atr_buf
-                                tp_price = float(sups.iloc[0]["level_price"]) if not sups.empty else p - (atr_val * 2.0)
-                                matched = True
+                    # Setup 3: Confirmed MTF Key Level Rejection
+                    if entry_setup is None:
+                        if allowed_side == "BUY" and not sups.empty and is_bullish:
+                            valid_sups = sups[sups["level_price"] <= p * 1.003]["level_price"].values
+                            valid_ress = resists[resists["level_price"] > p + atr_val]["level_price"].values
+                            for s_px in valid_sups:
+                                s_val = float(s_px)
+                                if abs(p - s_val) <= (s_val * 0.006) and p > s_val:
+                                    sl = s_val - atr_buf
+                                    tp = float(valid_ress[0]) if len(valid_ress) > 0 else p + (2.5 * atr_val)
+                                    if (tp - p) / max(0.01, p - sl) >= 1.6:
+                                        entry_setup = ("BUY", p, sl, tp, "MTF_SUPPORT_REJECTION")
+                                        break
+                        elif allowed_side == "SELL" and not resists.empty and is_bearish:
+                            valid_ress = resists[resists["level_price"] >= p * 0.997]["level_price"].values
+                            valid_sups = sups[sups["level_price"] < p - atr_val]["level_price"].values
+                            for r_px in valid_ress:
+                                r_val = float(r_px)
+                                if abs(p - r_val) <= (r_val * 0.006) and p < r_val:
+                                    sl = r_val + atr_buf
+                                    tp = float(valid_sups[-1]) if len(valid_sups) > 0 else p - (2.5 * atr_val)
+                                    if (p - tp) / max(0.01, sl - p) >= 1.6:
+                                        entry_setup = ("SELL", p, sl, tp, "MTF_RESISTANCE_REJECTION")
+                                        break
 
-                    if matched and abs(tp_price - p) >= (1.5 * abs(p - sl_price)):
-                        risk_per_share = abs(p - sl_price)
+                    if entry_setup is not None:
+                        e_side, e_p, e_sl, e_tp, e_reason = entry_setup
+                        risk_per_share = abs(e_p - e_sl)
                         qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / p)))
+                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
 
                         active_positions[ticker] = {
-                            "ticker": ticker, "position": allowed_side, "entry_date": d_str,
-                            "entry_time": t, "entry_price": p, "quantity": qty,
-                            "stop_loss": sl_price, "take_profit": tp_price, "current_price": p,
-                            "selector_id": 1, "initial_risk": risk_per_share, "breakeven_ratchet": False
+                            "ticker": ticker, "position": e_side, "entry_date": d_str,
+                            "entry_time": t, "entry_price": e_p, "quantity": qty,
+                            "stop_loss": e_sl, "take_profit": e_tp, "current_price": e_p,
+                            "selector_id": 1, "initial_risk": risk_per_share, "breakeven_ratchet": False,
+                            "be_trigger_r": 1.2
                         }
                         break
 
@@ -524,9 +596,18 @@ def simulate_strategy_engine(
     }
 
 
-def run_comparative_backtest(period_mode: str = "month"):
+def run_comparative_backtest(period_mode: str = "2months"):
     periods = []
-    if period_mode in ("month", "1month", "all"):
+    if period_mode in ("2months", "2month", "all"):
+        two_month_dates = [
+            "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-17",
+            "2026-09-18", "2026-09-22", "2026-09-23", "2026-09-29",
+            "2026-09-30", "2026-10-01", "2026-10-13", "2026-10-14",
+            "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20",
+            "2026-10-28", "2026-10-29"
+        ]
+        periods.append(("Full 2-Month Evaluation (Sep 11 - Oct 29, 2026)", two_month_dates, 8))
+    if period_mode in ("month", "1month", "both", "all"):
         month_dates = [
             "2026-09-29", "2026-09-30", "2026-10-01",
             "2026-10-14", "2026-10-15", "2026-10-16",
@@ -563,8 +644,10 @@ def run_comparative_backtest(period_mode: str = "month"):
         print(f"Total Eligible News Signals: {len(all_eligible)} | Unique Tickers: {len(unique_tickers)}")
 
         # Batch download market data (extends 5 trading days after date_list[-1] for multi-day runners)
+        # Yahoo Finance limits 15m intraday data to the last 60 calendar days
         all_syms = list(unique_tickers) + ["SPY", "QQQ"]
-        start_dt = pd.to_datetime(date_list[0]) - timedelta(days=14)
+        earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
+        start_dt = max(pd.to_datetime(date_list[0]) - timedelta(days=10), earliest_safe)
         end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=5)
         print(f"Downloading market data for {len(all_syms)} tickers (including SPY & QQQ benchmarks)...")
 
@@ -748,5 +831,5 @@ def run_comparative_backtest(period_mode: str = "month"):
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "month"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "2months"
     run_comparative_backtest(period_mode=mode)
