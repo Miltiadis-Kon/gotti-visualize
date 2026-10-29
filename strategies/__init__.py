@@ -14,6 +14,8 @@ from strategies.alpaca_smc_bridge import AlpacaSMCBridge
 from strategies.smc import SmartMoneyConceptsStrategy, SMCStrategy
 from strategies.smc_bias_model import SMCIntradayBiasStrategy, SMCBiasModelStrategy
 from strategies.market_reactor import MarketReactorStrategy
+from strategies.news_mtf_key_levels import NewsMTFKeyLevelsStrategy
+from strategies.news_liquidity_sweep import NewsLiquiditySweepStrategy
 from strategies.risk_management import (
     optimize_sl_tp,
     calculate_atr,
@@ -34,6 +36,8 @@ __all__ = [
     'SMCIntradayBiasStrategy',
     'SMCBiasModelStrategy',
     'MarketReactorStrategy',
+    'NewsMTFKeyLevelsStrategy',
+    'NewsLiquiditySweepStrategy',
     'optimize_sl_tp',
     'calculate_atr',
     'calculate_trailing_stop',
