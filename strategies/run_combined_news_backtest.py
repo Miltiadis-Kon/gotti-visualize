@@ -364,7 +364,7 @@ def simulate_strategy_engine(
                         }
                         break
 
-            # ── ENGINE C: NEWS + LIQUIDITY SWEEP ────────────────────────────
+            # ── ENGINE C: NEWS + LIQUIDITY SWEEP (MULTI-POOL ENGINE) ────────
             elif strategy_name == "News_LiquiditySweep":
                 open_time = bar0.name
                 prior_dates = sorted(list(set(df[df.index.date < curr_date].index.date)))
@@ -378,74 +378,56 @@ def simulate_strategy_engine(
 
                 pdh = float(prev_day_bars["high"].max())
                 pdl = float(prev_day_bars["low"].min())
+                pdc = float(prev_day_bars["close"].iloc[-1])
                 atr_val = calculate_atr(df[df.index <= open_time], length=14) or (open_price * 0.015)
-                atr_buf = atr_val * 0.5
+                atr_buf = atr_val * 0.8  # 0.8x 15m ATR buffer beyond sweep wick
 
-                swept = False
-                sweep_ext = None
-                sweep_bars = 0
                 allowed_side = sig.signal_position
 
-                for idx in range(len(day_candles)):
+                # Multi-pool levels: Pool 1 (ORB Extreme), Pool 2 (PDC), Pool 3 (PDH/PDL)
+                target_pools = [pdl, pdc, or_low] if allowed_side == "BUY" else [pdh, pdc, or_high]
+
+                for idx in range(1, len(day_candles)):
                     bar = day_candles.iloc[idx]
                     h, l, c = float(bar["high"]), float(bar["low"]), float(bar["close"])
                     v = float(bar["volume"])
-                    v_spike = v >= vol_ma.iloc[idx] if not np.isnan(vol_ma.iloc[idx]) else True
+                    v_spike = v >= (vol_ma.iloc[idx] * 1.15) if not np.isnan(vol_ma.iloc[idx]) else True
                     t = bar.name
 
-                    if allowed_side == "BUY":
-                        if not swept and l < pdl and v_spike:
-                            swept = True
-                            sweep_ext = l
-                            sweep_bars = 1
-                            continue
-                        elif swept:
-                            sweep_bars += 1
-                            sweep_ext = min(sweep_ext, l)
-                            if c > pdl:
-                                sl_price = sweep_ext - atr_buf
-                                tp_price = pdh
-                                if (tp_price - c) >= (1.5 * (c - sl_price)):
-                                    risk_per_share = abs(c - sl_price)
-                                    qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                                    qty = max(1, min(qty, floor((initial_portfolio * 0.95) / c)))
+                    sweep_trigger = None
 
-                                    active_positions[ticker] = {
-                                        "ticker": ticker, "position": "BUY", "entry_date": d_str,
-                                        "entry_time": t, "entry_price": c, "quantity": qty,
-                                        "stop_loss": sl_price, "take_profit": tp_price, "current_price": c,
-                                        "selector_id": 2, "initial_risk": risk_per_share, "breakeven_ratchet": False
-                                    }
+                    if allowed_side == "BUY" and v_spike:
+                        for pool_lvl in target_pools:
+                            if pool_lvl is not None and l < pool_lvl and c > pool_lvl:
+                                sl_price = l - atr_buf
+                                tp_price = max(pdh, c + (2.0 * atr_val))
+                                if (tp_price - c) / max(0.01, c - sl_price) >= 1.6:
+                                    sweep_trigger = ("BUY", c, sl_price, tp_price, f"SWEEP_RECLAIM_{pool_lvl:.2f}")
                                     break
-                            if sweep_bars > 4:
-                                swept = False
 
-                    elif allowed_side == "SELL":
-                        if not swept and h > pdh and v_spike:
-                            swept = True
-                            sweep_ext = h
-                            sweep_bars = 1
-                            continue
-                        elif swept:
-                            sweep_bars += 1
-                            sweep_ext = max(sweep_ext, h)
-                            if c < pdh:
-                                sl_price = sweep_ext + atr_buf
-                                tp_price = pdl
-                                if (c - tp_price) >= (1.5 * (sl_price - c)):
-                                    risk_per_share = abs(sl_price - c)
-                                    qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                                    qty = max(1, min(qty, floor((initial_portfolio * 0.95) / c)))
-
-                                    active_positions[ticker] = {
-                                        "ticker": ticker, "position": "SELL", "entry_date": d_str,
-                                        "entry_time": t, "entry_price": c, "quantity": qty,
-                                        "stop_loss": sl_price, "take_profit": tp_price, "current_price": c,
-                                        "selector_id": 2, "initial_risk": risk_per_share, "breakeven_ratchet": False
-                                    }
+                    elif allowed_side == "SELL" and v_spike:
+                        for pool_lvl in target_pools:
+                            if pool_lvl is not None and h > pool_lvl and c < pool_lvl:
+                                sl_price = h + atr_buf
+                                tp_price = min(pdl, c - (2.0 * atr_val))
+                                if (c - tp_price) / max(0.01, sl_price - c) >= 1.6:
+                                    sweep_trigger = ("SELL", c, sl_price, tp_price, f"SWEEP_RECLAIM_{pool_lvl:.2f}")
                                     break
-                            if sweep_bars > 4:
-                                swept = False
+
+                    if sweep_trigger is not None:
+                        e_side, e_p, e_sl, e_tp, e_reason = sweep_trigger
+                        risk_per_share = abs(e_p - e_sl)
+                        qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
+                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
+
+                        active_positions[ticker] = {
+                            "ticker": ticker, "position": e_side, "entry_date": d_str,
+                            "entry_time": t, "entry_price": e_p, "quantity": qty,
+                            "stop_loss": e_sl, "take_profit": e_tp, "current_price": e_p,
+                            "selector_id": 2, "initial_risk": risk_per_share, "breakeven_ratchet": False,
+                            "be_trigger_r": 1.2
+                        }
+                        break
 
         # ── 2. MONITOR ACTIVE POSITIONS ACROSS CURR_DATE CANDLES ─────────────
         closed_tickers = []
@@ -460,11 +442,12 @@ def simulate_strategy_engine(
                 pos["current_price"] = c
                 b_time = bar.name.time()
 
-                # Selector 1: Breakeven Stop Ratchet at +1.5R
-                if pos.get("selector_id") == 1 and not pos.get("breakeven_ratchet", False):
+                # Breakeven Stop Ratchet (+1.2R for MTF/Sweep, +1.5R for Selector 1)
+                be_r = pos.get("be_trigger_r", 1.5)
+                if not pos.get("breakeven_ratchet", False):
                     signed_gain = (c - pos["entry_price"]) if pos["position"] == "BUY" else (pos["entry_price"] - c)
                     r_mult = signed_gain / pos["initial_risk"] if pos["initial_risk"] > 0 else 0.0
-                    if r_mult >= 1.50:
+                    if r_mult >= be_r:
                         pos["stop_loss"] = pos["entry_price"]
                         pos["breakeven_ratchet"] = True
 
