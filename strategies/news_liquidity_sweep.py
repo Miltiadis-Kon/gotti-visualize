@@ -65,7 +65,7 @@ class NewsLiquiditySweepStrategy(StrategyBaseplate):
         "ATR_Length": 14,
         "ATR_Stop_Buffer_Multiplier": 0.8,    # Applied to 15m ATR beyond the sweep extreme wick
         "BreakevenTriggerR": 1.2,             # Ratchet stop to breakeven at +1.2R
-        "AllowOvernight": True,
+        "AllowOvernight": False,              # Intraday mean-reversion reclaims flatten at 15:50 EOD
     }
 
     def initialize(self):
@@ -282,28 +282,24 @@ class NewsLiquiditySweepStrategy(StrategyBaseplate):
     def _get_candidate_pools(self, side: str) -> List[Tuple[str, float]]:
         """
         Returns ordered list of (pool_name, level_price) to monitor for liquidity sweeps.
-        - For BUY: Downside stop pools (OR_Low, PDL, PDC, or PDH breakout retest).
-        - For SELL: Upside stop pools (OR_High, PDH, PDC, or PDL breakdown retest).
+        - For BUY: Downside discount stop pools (PDL, PDC Gap Fill, OR_Low).
+        - For SELL: Upside premium stop pools (PDH, PDC Gap Fill, OR_High).
         """
         pools: List[Tuple[str, float]] = []
         if side == "BUY":
-            if self.or_low is not None:
-                pools.append(("OR_LOW", self.or_low))
             if self.pdl is not None:
                 pools.append(("PDL", self.pdl))
             if self.pdc is not None:
                 pools.append(("PDC_GAP", self.pdc))
-            if self.pdh is not None:
-                pools.append(("PDH_FLIP", self.pdh))
+            if self.or_low is not None:
+                pools.append(("OR_LOW", self.or_low))
         else:
-            if self.or_high is not None:
-                pools.append(("OR_HIGH", self.or_high))
             if self.pdh is not None:
                 pools.append(("PDH", self.pdh))
             if self.pdc is not None:
                 pools.append(("PDC_GAP", self.pdc))
-            if self.pdl is not None:
-                pools.append(("PDL_FLIP", self.pdl))
+            if self.or_high is not None:
+                pools.append(("OR_HIGH", self.or_high))
 
         # Deduplicate levels that are within 0.15% of each other
         unique_pools: List[Tuple[str, float]] = []
@@ -316,25 +312,17 @@ class NewsLiquiditySweepStrategy(StrategyBaseplate):
 
     def _get_opposing_target(self, side: str, entry_price: float, atr_15m: float, df_5m: pd.DataFrame, today: datetime.date) -> float:
         """
-        Selects a realistic opposing liquidity pool for Take Profit.
-        If price is already beyond PDH/PDL, projects a dynamic 2.2x 15m ATR target.
+        Selects the major opposing liquidity pool for Take Profit (PDH for BUY, PDL for SELL,
+        or dynamic 2.0x 15m ATR target) to capture institutional mean-reversion runners.
         """
-        today_bars = df_5m[df_5m["session_date"] == today] if "session_date" in df_5m.columns else df_5m
-        session_high = float(today_bars["high"].max()) if not today_bars.empty else entry_price + (2.0 * atr_15m)
-        session_low = float(today_bars["low"].min()) if not today_bars.empty else entry_price - (2.0 * atr_15m)
-
         if side == "BUY":
-            candidates = [
-                lvl for lvl in [self.or_high, session_high, self.pdh, self.pdc]
-                if lvl is not None and lvl > entry_price + (1.2 * atr_15m)
-            ]
-            return min(candidates) if candidates else entry_price + (2.2 * atr_15m)
+            if self.pdh is not None and self.pdh > entry_price + (1.2 * atr_15m):
+                return self.pdh
+            return entry_price + (2.0 * atr_15m)
         else:
-            candidates = [
-                lvl for lvl in [self.or_low, session_low, self.pdl, self.pdc]
-                if lvl is not None and lvl < entry_price - (1.2 * atr_15m)
-            ]
-            return max(candidates) if candidates else entry_price - (2.2 * atr_15m)
+            if self.pdl is not None and self.pdl < entry_price - (1.2 * atr_15m):
+                return self.pdl
+            return entry_price - (2.0 * atr_15m)
 
     # ─────────────────────────────────────────────────────────────────────────
     # 3. MAIN EXECUTION LOOP
@@ -377,9 +365,9 @@ class NewsLiquiditySweepStrategy(StrategyBaseplate):
             pnl_per_share = (current_price - trade.entry_price) if trade.trade_type == "BUY" else (trade.entry_price - current_price)
             r_mult = (pnl_per_share / self.active_initial_risk) if self.active_initial_risk > 0 else 0.0
 
-            # EOD Protection for Selector 2 (Counter-Fundamental) or weak Selector 3 trades
+            # EOD Protection: Flatten at 15:50 if overnight disallowed, Selector 2, or weak Selector 3
             if current_dt.time() >= time(15, 50):
-                if self.active_selector_id == 2 or (self.active_selector_id == 3 and r_mult < 0.5):
+                if not self.parameters.get("AllowOvernight", False) or self.active_selector_id == 2 or (self.active_selector_id == 3 and r_mult < 0.5):
                     self.log_message(f"[{ticker_sym}] EOD Sweep Guard Flatten @ ${current_price:.2f} ({r_mult:+.2f}R)")
                     self.trade_tracker.close_trade(self.active_trade_id, current_dt, current_price, "EOD_GUARD")
                     self._close_position()
