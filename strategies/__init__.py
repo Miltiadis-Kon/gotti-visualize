@@ -13,6 +13,7 @@ from strategies.macd_strategy import MACDTradingStrategy
 from strategies.alpaca_smc_bridge import AlpacaSMCBridge
 from strategies.smc import SmartMoneyConceptsStrategy, SMCStrategy
 from strategies.smc_bias_model import SMCIntradayBiasStrategy, SMCBiasModelStrategy
+from strategies.market_reactor import MarketReactorStrategy
 from strategies.risk_management import (
     optimize_sl_tp,
     calculate_atr,
@@ -32,6 +33,7 @@ __all__ = [
     'SMCStrategy',
     'SMCIntradayBiasStrategy',
     'SMCBiasModelStrategy',
+    'MarketReactorStrategy',
     'optimize_sl_tp',
     'calculate_atr',
     'calculate_trailing_stop',
