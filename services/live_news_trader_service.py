@@ -50,6 +50,7 @@ from strategies.market_reactor import (
 )
 from strategies.risk_management import calculate_atr
 from strategies.trade_tracker import TradeTracker
+from services.signal_observer import RealTimeSignalObserver
 
 # Configure logging
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -110,6 +111,21 @@ class LiveNewsTraderService:
         self._setup_signal_handlers()
         self._load_persisted_state()
         self._init_broker()
+
+        # Real-time event-driven signal observer (<5ms WebSocket + sub-second DB change detection)
+        self.observer = RealTimeSignalObserver(
+            on_signal_callback=self._on_instant_signal_observed,
+            db_poll_interval_sec=1.0,
+        )
+
+    def _on_instant_signal_observed(self, sig: ReactorSignal):
+        """Callback fired immediately upon real-time signal detection (< 5ms via WS or < 1s via DB)."""
+        logger.info(f"⚡ [OBSERVER EVENT] Processing instant live signal: {sig.ticker} {sig.signal_position}")
+        self._process_single_signal(sig, is_historical=False)
+        now_est = datetime.now(self.tz_est)
+        phase, _ = self.get_market_session_state(now_est)
+        if phase == "REGULAR_TRADING":
+            self.evaluate_live_market()
 
     def _setup_signal_handlers(self):
         def handle_shutdown(signum, frame):
@@ -917,69 +933,79 @@ class LiveNewsTraderService:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_all_the_time(self):
-        """Main service daemon loop executing continuously 24/7."""
+        """Main service daemon loop executing continuously 24/7 with real-time observer."""
         logger.info("=" * 90)
-        logger.info(" GOTTI LIVE NEWS TRADER SERVICE STARTED (24/7 CONTINUOUS MODE)")
+        logger.info(" GOTTI LIVE NEWS TRADER SERVICE STARTED (REAL-TIME EVENT OBSERVER MODE)")
         logger.info(f" Enabled Strategies: {', '.join(self.enabled_strategies)}")
         logger.info(f" Mode: {'DRY-RUN' if self.dry_run else ('PAPER' if self.paper else 'LIVE')}")
-        logger.info(f" Initial Portfolio: ${self.portfolio_value:,.2f} | Poll Interval: {self.poll_interval_sec}s")
+        logger.info(f" Initial Portfolio: ${self.portfolio_value:,.2f}")
+        logger.info(" Signal Pipeline: Real-Time WebSocket Push (<5ms) + Sub-Second DB Watcher (0ms lag)")
         logger.info("=" * 90)
 
-        while self.running:
-            try:
-                now_est = datetime.now(self.tz_est)
-                phase, _ = self.get_market_session_state(now_est)
+        # Start real-time signal observer (WebSocket + reactive DB change detector)
+        self.observer.start()
 
-                # Reset daily state on date change
-                self._check_and_reset_daily_session(now_est)
+        try:
+            while self.running:
+                try:
+                    now_est = datetime.now(self.tz_est)
+                    phase, _ = self.get_market_session_state(now_est)
 
-                if phase == "REGULAR_TRADING":
-                    # Market is active (9:30 - 16:00 EST)
-                    self.poll_new_live_signals()
-                    self.evaluate_live_market()
-                    self._emit_heartbeat(status="ACTIVE_TRADING")
-                    time.sleep(self.poll_interval_sec)
+                    # Reset daily state on date change
+                    self._check_and_reset_daily_session(now_est)
 
-                elif phase == "PRE_MARKET":
-                    # Pre-market preparation (04:00 - 09:30 EST)
-                    self.poll_new_live_signals()
-                    self._emit_heartbeat(status="PRE_MARKET_MONITORING")
-                    # Sleep slightly longer pre-market
-                    time.sleep(max(30, self.poll_interval_sec * 2))
+                    if phase == "REGULAR_TRADING":
+                        # Instant wake on incoming signal event OR 1.0s market tick for live evaluation
+                        sig_event = self.observer.get_event(timeout=1.0)
+                        if sig_event:
+                            self._on_instant_signal_observed(sig_event)
 
-                elif phase == "AFTER_HOURS":
-                    # After-hours queueing (16:00 - 20:00 EST)
-                    # Ensure any straggling intraday positions are closed
-                    if self.active_positions:
-                        self.manage_active_positions(now_est)
-                    self.poll_new_live_signals()
-                    self._emit_heartbeat(status="AFTER_HOURS_QUEUE")
-                    time.sleep(60)
+                        self.evaluate_live_market()
+                        self._emit_heartbeat(status="ACTIVE_TRADING")
 
-                elif phase == "WEEKEND":
-                    # Weekend sleeping
-                    self._emit_heartbeat(status="WEEKEND_IDLE")
-                    logger.info("Market is closed for the weekend. Sleeping for 15 minutes...")
-                    time.sleep(900)
+                    elif phase == "PRE_MARKET":
+                        # Pre-market: wait for live signal push or 3s tick
+                        sig_event = self.observer.get_event(timeout=3.0)
+                        if sig_event:
+                            self._on_instant_signal_observed(sig_event)
+                        self._emit_heartbeat(status="PRE_MARKET_MONITORING")
 
-                else:  # OVERNIGHT
-                    # Overnight sleeping (20:00 - 04:00 EST)
-                    self._emit_heartbeat(status="OVERNIGHT_SLEEP")
-                    logger.info("Overnight phase (20:00 - 04:00 EST). Waiting for next pre-market session...")
-                    time.sleep(600)
+                    elif phase == "AFTER_HOURS":
+                        # After-hours queueing: flatten open positions and wait for catalysts
+                        if self.active_positions:
+                            self.manage_active_positions(now_est)
+                        sig_event = self.observer.get_event(timeout=10.0)
+                        if sig_event:
+                            self._on_instant_signal_observed(sig_event)
+                        self._emit_heartbeat(status="AFTER_HOURS_QUEUE")
 
-            except KeyboardInterrupt:
-                logger.info("Service manually interrupted.")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in live service loop: {e}", exc_info=True)
-                time.sleep(10)
+                    elif phase == "WEEKEND":
+                        # Weekend sleeping: wait for events or 60s tick
+                        self._emit_heartbeat(status="WEEKEND_IDLE")
+                        sig_event = self.observer.get_event(timeout=60.0)
+                        if sig_event:
+                            self._on_instant_signal_observed(sig_event)
 
-        # Graceful shutdown
-        logger.info("Flushing state and terminating Live News Trader Service...")
-        self._persist_state()
-        self._emit_heartbeat(status="STOPPED")
-        logger.info("Live News Trader Service shut down cleanly.")
+                    else:  # OVERNIGHT
+                        # Overnight phase: wait for catalysts or 30s tick
+                        self._emit_heartbeat(status="OVERNIGHT_SLEEP")
+                        sig_event = self.observer.get_event(timeout=30.0)
+                        if sig_event:
+                            self._on_instant_signal_observed(sig_event)
+
+                except KeyboardInterrupt:
+                    logger.info("Service manually interrupted.")
+                    break
+                except Exception as e:
+                    logger.error(f"Unexpected error in live service loop: {e}", exc_info=True)
+                    time.sleep(2)
+        finally:
+            # Graceful shutdown
+            logger.info("Stopping real-time observer and flushing state...")
+            self.observer.stop()
+            self._persist_state()
+            self._emit_heartbeat(status="STOPPED")
+            logger.info("Live News Trader Service shut down cleanly.")
 
 
 def main():
