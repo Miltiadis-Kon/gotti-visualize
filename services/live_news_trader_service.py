@@ -51,6 +51,10 @@ from strategies.market_reactor import (
 from strategies.risk_management import calculate_atr
 from strategies.trade_tracker import TradeTracker
 from services.signal_observer import RealTimeSignalObserver
+from strategies.high_beta_catalyst_open import (
+    COMPETITOR_MAP,
+    CatalystConfluenceEngine,
+)
 
 # Configure logging
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -87,7 +91,11 @@ class LiveNewsTraderService:
         self.paper = paper
         self.poll_interval_sec = poll_interval_sec
         self.dry_run = dry_run
-        self.enabled_strategies = strategies or ["News_LiquiditySweep", "MarketReactor_Fade"]
+        self.enabled_strategies = strategies or [
+            "News_LiquiditySweep",
+            "MarketReactor_Fade",
+            "HighBeta_CatalystOpen",
+        ]
         self.initial_portfolio = initial_portfolio
 
         self.tz_est = pytz.timezone("America/New_York")
@@ -459,6 +467,10 @@ class LiveNewsTraderService:
             if "MarketReactor_Fade" in self.enabled_strategies and sig.selector_id == 2 and cur_time >= dtime(9, 45) and cur_time < dtime(15, 55):
                 self._evaluate_market_reactor_fade_entry(ticker, ctx, sig, candles_5m, current_price)
 
+            # Strategy Engine 3: HighBeta_CatalystOpen (09:30 - 10:15 AM EST)
+            if "HighBeta_CatalystOpen" in self.enabled_strategies and cur_time >= dtime(9, 30) and cur_time <= dtime(10, 15):
+                self._evaluate_high_beta_catalyst_open_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
+
         # Active position management & ratchets
         self.manage_active_positions(now_est)
 
@@ -658,6 +670,120 @@ class LiveNewsTraderService:
                 sig=sig,
                 ctx=ctx,
                 be_trigger_r=1.2,
+                eod_flatten_time=dtime(15, 55),
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STRATEGY 3: HIGH-BETA CATALYST OPENING STRATEGY
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _evaluate_high_beta_catalyst_open_entry(
+        self,
+        ticker: str,
+        ctx: Dict[str, Any],
+        sig: ReactorSignal,
+        df_5m: pd.DataFrame,
+        current_price: float,
+        now_est: datetime,
+    ):
+        """
+        Executes the 5-step rulebook across high-beta equities:
+        Evaluates Catalyst Confluence (> 4 or < 2 on stock/peers), Nasdaq (QQQ) regime,
+        and trades Pattern 1 (Golden V-Shape), Pattern 2 (Straight Rally), Pattern 3
+        (Bear False Recovery), or Pattern 4 (Forensic Bull Flag).
+        """
+        high_beta_tickers = {"COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"}
+        pdc = ctx.get("pdc")
+        daily_atr = ctx.get("daily_atr", current_price * 0.025)
+        atr_pct = (daily_atr / pdc) if pdc else 0.025
+        if ticker not in high_beta_tickers and atr_pct < 0.020:
+            return
+
+        today_bars = df_5m[df_5m.index.date == now_est.date()]
+        if len(today_bars) < 2:
+            return
+
+        open_price = float(today_bars.iloc[0]["open"])
+        session_low = float(today_bars["low"].min())
+        session_high = float(today_bars["high"].max())
+
+        last_bar = today_bars.iloc[-1]
+        prev_bar = today_bars.iloc[-2]
+        is_green_reversal = (last_bar["close"] > last_bar["open"]) and (last_bar["close"] > prev_bar["high"])
+        is_red_breakdown = (last_bar["close"] < last_bar["open"]) and (last_bar["close"] < prev_bar["low"])
+
+        # Catalyst Confluence
+        today_str = now_est.strftime("%Y-%m-%d")
+        cat_analysis = CatalystConfluenceEngine.analyze_catalysts(
+            target_ticker=ticker,
+            target_date_str=today_str,
+            signals_cache=list(self.session_signals.values())
+        )
+        cat_bias = cat_analysis["catalyst_bias"]
+        cat_type = cat_analysis["catalyst_type"]
+
+        # Nasdaq QQQ Regime
+        qqq_regime = "BULL_MARKET"
+        if "QQQ" in self.active_watchlist:
+            qqq_ctx = self.active_watchlist["QQQ"]
+            qqq_pdc = qqq_ctx.get("pdc", 480.0)
+            if current_price < qqq_pdc:
+                qqq_regime = "BEAR_MARKET"
+
+        tp_pct = 0.020  # +2.0% Take Profit
+        sl_pct = 0.035  # -3.5% Stop Loss
+        trigger_setup = None
+
+        # Pattern 2: Straight Rally Breakout (Bull Market + Bullish Catalyst > 4)
+        if qqq_regime == "BULL_MARKET" and cat_bias == "BULLISH" and now_est.time() <= dtime(9, 45):
+            gain_from_open = (current_price - open_price) / open_price
+            if gain_from_open >= 0.008 and is_green_reversal:
+                sl = min(current_price * (1.0 - sl_pct), session_low)
+                tp = current_price * (1.0 + tp_pct)
+                trigger_setup = ("BUY", current_price, sl, tp, f"PATTERN_2_STRAIGHT_RALLY | {cat_type}")
+
+        # Pattern 1: Golden V-Shape (Bull Market + Neutral Catalyst -> PDC Rebound)
+        elif qqq_regime == "BULL_MARKET" and cat_bias == "NEUTRAL" and pdc:
+            drop_from_open = (open_price - current_price) / open_price
+            tested_pdc = (drop_from_open >= 0.008 and abs(current_price - pdc) / pdc <= 0.008) or (current_price <= pdc and drop_from_open >= 0.010)
+            if tested_pdc and is_green_reversal:
+                sl = min(current_price * (1.0 - sl_pct), session_low - (0.002 * current_price))
+                tp = current_price * (1.0 + tp_pct)
+                trigger_setup = ("BUY", current_price, sl, tp, "PATTERN_1_GOLDEN_V_SHAPE_PDC_REBOUND")
+
+        # Pattern 4: Forensic COIN V-Recovery + Higher-Low Bull Flag
+        elif qqq_regime == "BULL_MARKET" and cat_bias == "BULLISH":
+            dip_depth = (open_price - session_low) / open_price
+            bounce_height = (session_high - session_low) / session_low
+            if dip_depth >= 0.008 and bounce_height >= 0.008:
+                is_higher_low = (last_bar["low"] >= session_low * 1.006) and (current_price < session_high)
+                if is_higher_low and is_green_reversal:
+                    sl = session_low - (0.003 * current_price)
+                    tp = current_price * (1.0 + tp_pct)
+                    trigger_setup = ("BUY", current_price, sl, tp, f"PATTERN_4_FORENSIC_COIN_BULL_FLAG | {cat_type}")
+
+        # Pattern 3: Bear Market False Recovery Breakdown
+        elif (qqq_regime == "BEAR_MARKET" or cat_bias == "BEARISH") and (current_price < open_price):
+            attempted_recovery = (session_high < open_price * 1.003) and (session_high > session_low * 1.004)
+            breaks_morning_low = (current_price < session_low) and is_red_breakdown
+            if attempted_recovery and breaks_morning_low:
+                sl = min(current_price * (1.0 + sl_pct), session_high + (0.003 * current_price))
+                tp = current_price * (1.0 - tp_pct)
+                trigger_setup = ("SELL", current_price, sl, tp, f"PATTERN_3_BEAR_FALSE_RECOVERY | {cat_type}")
+
+        if trigger_setup:
+            side, entry_p, sl, tp, reason = trigger_setup
+            self._execute_live_trade(
+                strategy_name="HighBeta_CatalystOpen",
+                ticker=ticker,
+                side=side,
+                entry_price=entry_p,
+                stop_loss=sl,
+                take_profit=tp,
+                reason=reason,
+                sig=sig,
+                ctx=ctx,
+                be_trigger_r=1.0,
                 eod_flatten_time=dtime(15, 55),
             )
 
@@ -1017,7 +1143,7 @@ def main():
     parser.add_argument(
         "--strategies",
         type=str,
-        default="News_LiquiditySweep,MarketReactor_Fade",
+        default="News_LiquiditySweep,MarketReactor_Fade,HighBeta_CatalystOpen",
         help="Comma-separated list of strategies to run"
     )
 
