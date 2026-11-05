@@ -681,29 +681,30 @@ def run_comparative_backtest(period_mode: str = "6months"):
             "2026-09-23", "2026-09-29", "2026-09-30", "2026-10-01",
             "2026-10-03", "2026-10-13", "2026-10-14", "2026-10-15",
             "2026-10-16", "2026-10-19", "2026-10-20", "2026-10-28",
-            "2026-10-29"
+            "2026-10-29", "2026-11-02", "2026-11-03"
         ]
-        periods.append(("Full 6-Month Evaluation (Apr 29 - Oct 29, 2026)", six_month_dates, 8))
+        periods.append(("Full 6-Month Evaluation (May 5 - Nov 5, 2026)", six_month_dates, 8))
     if period_mode in ("2months", "2month", "all"):
         two_month_dates = [
             "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-17",
             "2026-09-18", "2026-09-22", "2026-09-23", "2026-09-29",
             "2026-09-30", "2026-10-01", "2026-10-13", "2026-10-14",
             "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20",
-            "2026-10-28", "2026-10-29"
+            "2026-10-28", "2026-10-29", "2026-11-02", "2026-11-03"
         ]
-        periods.append(("Full 2-Month Evaluation (Sep 11 - Oct 29, 2026)", two_month_dates, 8))
+        periods.append(("Full 2-Month Evaluation (Sep 11 - Nov 5, 2026)", two_month_dates, 8))
     if period_mode in ("month", "1month", "both", "all"):
         month_dates = [
             "2026-09-29", "2026-09-30", "2026-10-01",
             "2026-10-14", "2026-10-15", "2026-10-16",
-            "2026-10-19", "2026-10-20", "2026-10-28", "2026-10-29"
+            "2026-10-19", "2026-10-20", "2026-10-28", "2026-10-29",
+            "2026-11-02", "2026-11-03"
         ]
-        periods.append(("Full 1-Month Period (Sep 29 - Oct 29, 2026)", month_dates, 8))
+        periods.append(("Full 1-Month Period (Sep 29 - Nov 5, 2026)", month_dates, 8))
     if period_mode in ("oct_week", "both", "all"):
         periods.append(("Full 5-Day Trading Week", ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"], 10))
     if period_mode in ("recent_week", "both", "all"):
-        periods.append(("Recent Calendar Week", ["2026-10-28", "2026-10-29"], 15))
+        periods.append(("Recent Trading Sessions", ["2026-10-28", "2026-10-29", "2026-11-02", "2026-11-03"], 15))
 
     initial_portfolio = 100000.0
 
@@ -856,10 +857,10 @@ def run_comparative_backtest(period_mode: str = "6months"):
                         "pnl": b_pnl
                     })
 
-        # Add Full 6-Month Macro Benchmark (April 29 - October 29) if evaluating 6-month period
+        # Add Full 6-Month Macro Benchmark if evaluating 6-month period
         if "6-Month" in period_title or period_mode in ("6months", "6month"):
             try:
-                macro_df = yf.download(["SPY", "QQQ"], start="2026-04-29", end="2026-10-30", interval="1d", progress=False)
+                macro_df = yf.download(["SPY", "QQQ"], start="2026-05-05", end="2026-11-06", interval="1d", progress=False)
                 for b_sym, b_name in [("SPY", "SPY (S&P 500 ETF)"), ("QQQ", "NASDAQ 100 (QQQ ETF)")]:
                     if "Open" in macro_df and b_sym in macro_df["Open"]:
                         m_open = float(macro_df["Open"][b_sym].dropna().iloc[0])
