@@ -103,10 +103,7 @@ class LiveNewsTraderService:
         self.enabled_strategies = strategies or [
             "News_LiquiditySweep",
             "MarketReactor_Fade",
-            "ZedStrategy",
-            "ZedInstitutionalStrategy",
-            "HighBeta_CatalystOpen",
-            "Institutional_VRecovery",
+            "ZedStrategy_Institutional",
         ]
         self.initial_portfolio = initial_portfolio
 
@@ -499,8 +496,8 @@ class LiveNewsTraderService:
             if any(s in self.enabled_strategies for s in ("ZedStrategy", "HighBeta_CatalystOpen")) and cur_time >= dtime(9, 30) and cur_time <= dtime(10, 15):
                 self._evaluate_zed_strategy_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
 
-            # Strategy Engine 4: ZedInstitutionalStrategy / Institutional_VRecovery (09:35 - 10:15 AM EST)
-            if any(s in self.enabled_strategies for s in ("ZedInstitutionalStrategy", "ZedNoVwapStrategy", "Institutional_VRecovery")) and cur_time >= dtime(9, 35) and cur_time <= dtime(10, 15):
+            # Strategy Engine 4: ZedStrategy_Institutional (V2: WITH VWAP & RVOL) (09:35 - 10:15 AM EST)
+            if any(s in self.enabled_strategies for s in ("ZedStrategy_Institutional", "ZedInstitutionalStrategy", "Institutional_VRecovery")) and cur_time >= dtime(9, 35) and cur_time <= dtime(10, 15):
                 self._evaluate_zed_institutional_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
 
         # Active position management & ratchets
@@ -1340,7 +1337,7 @@ def main():
     parser.add_argument(
         "--strategies",
         type=str,
-        default="News_LiquiditySweep,MarketReactor_Fade,ZedStrategy,ZedInstitutionalStrategy,HighBeta_CatalystOpen,Institutional_VRecovery",
+        default="News_LiquiditySweep,MarketReactor_Fade,ZedStrategy_Institutional",
         help="Comma-separated list of strategies to run"
     )
 
