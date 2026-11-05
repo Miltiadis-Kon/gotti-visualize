@@ -423,6 +423,18 @@ class LiveNewsTraderService:
                 pdh = float(df["high"].iloc[-2])
                 pdl = float(df["low"].iloc[-2])
                 daily_atr = float(calculate_atr(df, length=min(14, len(df) - 1))) or (pdc * 0.02)
+
+            # Dynamic 7-day consecutive volatility pre-qualification across broad universe
+            is_qualified_zed = False
+            if df is not None and not df.empty and len(df) >= 7:
+                now_d = datetime.now(self.tz_est).date()
+                ok_zed, avg_r, _ = check_7day_consecutive_volatility(
+                    ticker, now_d, df, min_daily_range_pct=0.020, lookback_days=7
+                )
+                if ok_zed:
+                    self.qualified_7day_volatility_tickers.add(ticker)
+                    is_qualified_zed = True
+                    logger.info(f"[{ticker}] PASSED 7-Day Volatility Screen ({avg_r:.2%}) -> Dynamically qualified for ZedStrategy!")
         except Exception as e:
             logger.warning(f"Notice calculating daily levels for {ticker}: {e}")
 
@@ -433,6 +445,8 @@ class LiveNewsTraderService:
             "pdl": pdl,
             "pdc": pdc,
             "daily_atr": daily_atr,
+            "df_1d": df,
+            "is_qualified_zed": is_qualified_zed,
             "or_high": None,
             "or_low": None,
             "swept_levels": set(),
@@ -712,28 +726,20 @@ class LiveNewsTraderService:
         4. Catalyst Confluence (> 4 or < 2 on stock/peers)
         5. Mechanical +2.0% Take Profit, -3.5% Stop Loss, +1.0% Breakeven Ratchet
         """
-        # Step 1: Verify 7-Day Consecutive Volatility Screen
+        # Step 1: Verify 7-Day Consecutive Volatility Screen across dynamic universe
         if ticker not in self.qualified_7day_volatility_tickers:
-            try:
-                import yfinance as yf
-                df_1d = yf.download(ticker, period="30d", interval="1d", progress=False)
-                if not df_1d.empty:
-                    df_1d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_1d.columns]
-                    is_ok, avg_r, _ = check_7day_consecutive_volatility(
-                        ticker, now_est.date(), df_1d, min_daily_range_pct=0.020, lookback_days=7
-                    )
-                    if is_ok:
-                        self.qualified_7day_volatility_tickers.add(ticker)
-                        logger.info(f"[{ticker}] PASSED 7-Day Volatility Screen ({avg_r:.2%}) -> Active in ZedStrategy universe.")
-                    else:
-                        logger.debug(f"[{ticker}] FAILED 7-Day Volatility Screen ({avg_r:.2%}) -> Skipped.")
-                        return
+            df_1d = ctx.get("df_1d")
+            if df_1d is not None and not df_1d.empty and len(df_1d) >= 7:
+                is_ok, avg_r, _ = check_7day_consecutive_volatility(
+                    ticker, now_est.date(), df_1d, min_daily_range_pct=0.020, lookback_days=7
+                )
+                if is_ok:
+                    self.qualified_7day_volatility_tickers.add(ticker)
+                    logger.info(f"[{ticker}] PASSED 7-Day Volatility Screen ({avg_r:.2%}) -> Active in ZedStrategy universe.")
                 else:
                     return
-            except Exception as e:
-                logger.warning(f"Notice checking 7-day volatility for {ticker}: {e}")
-                if ticker not in {"COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"}:
-                    return
+            else:
+                return
 
         pdc = ctx.get("pdc")
         daily_atr = ctx.get("daily_atr", current_price * 0.025)
@@ -850,25 +856,19 @@ class LiveNewsTraderService:
         4. Structural Volatility Stop (1.2x of 15m ATR below session low, max 3.0%)
         5. Scaled Profit Targets (+2.0% TP1, +3.5% TP2 Runner, +1.0% Breakeven Ratchet)
         """
-        # Step 1: 7-Day Volatility Qualification
+        # Step 1: 7-Day Volatility Qualification across dynamic universe
         if ticker not in self.qualified_7day_volatility_tickers:
-            try:
-                import yfinance as yf
-                df_1d = yf.download(ticker, period="30d", interval="1d", progress=False)
-                if not df_1d.empty:
-                    df_1d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_1d.columns]
-                    is_ok, avg_r, _ = check_7day_consecutive_volatility(
-                        ticker, now_est.date(), df_1d, min_daily_range_pct=0.020, lookback_days=7
-                    )
-                    if is_ok:
-                        self.qualified_7day_volatility_tickers.add(ticker)
-                    else:
-                        return
+            df_1d = ctx.get("df_1d")
+            if df_1d is not None and not df_1d.empty and len(df_1d) >= 7:
+                is_ok, avg_r, _ = check_7day_consecutive_volatility(
+                    ticker, now_est.date(), df_1d, min_daily_range_pct=0.020, lookback_days=7
+                )
+                if is_ok:
+                    self.qualified_7day_volatility_tickers.add(ticker)
                 else:
                     return
-            except Exception:
-                if ticker not in {"COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"}:
-                    return
+            else:
+                return
 
         today = now_est.date()
         date_str = today.strftime("%Y-%m-%d")

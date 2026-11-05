@@ -370,9 +370,10 @@ def simulate_institutional_v_engine(
 simulate_zed_institutional_engine = simulate_institutional_v_engine
 
 
-def run_comparative_inst_v_backtest(period_mode: str = "3months"):
+def run_comparative_inst_v_backtest(period_mode: str = "3months", max_trades_per_day: int = 10):
     print("\n" + "=" * 115)
-    print(" INSTITUTIONAL V-RECOVERY STRATEGY COMPARATIVE BACKTEST RUNNER (5 ENHANCEMENTS)")
+    print(f" INSTITUTIONAL V-RECOVERY DYNAMIC MULTI-STOCK BACKTEST ({period_mode.upper()})")
+    print(f" Max Concurrent Positions Per Day: {max_trades_per_day}")
     print("=" * 115)
 
     conn = get_mysql_connection()
@@ -395,7 +396,6 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
         period_title = "Past 2 Months (Sep 1 - Nov 5, 2026)"
 
     print(f"Evaluation Period: {period_title} ({len(date_list)} trading sessions)")
-    print(f"High-Beta Universe: {', '.join(HIGH_BETA_UNIVERSE)}")
 
     # Ingest signals
     all_eligible: List[Tuple[str, ReactorSignal]] = []
@@ -406,69 +406,122 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
 
     print(f"Total News Signals Ingested: {len(all_eligible)}")
 
-    # Download 5m candles via Alpaca IEX (with YFinance fallback)
-    all_download_syms = list(set(HIGH_BETA_UNIVERSE + ["SPY", "QQQ"]))
+    # Dynamic Candidate Pool: Broad universe of tickers appearing in signals + core benchmarks
+    seed_pool = ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR", "SMCI", "RBLX", "RIOT", "CLSK", "AAPL", "MSFT"]
+    signal_candidates = [s.ticker.upper().strip() for d, s in all_eligible if s.ticker]
+    all_candidate_syms = list(dict.fromkeys(seed_pool + signal_candidates))
+    print(f"Dynamic Candidate Universe: {len(all_candidate_syms)} distinct tickers")
+
     start_dt = pd.to_datetime(date_list[0]) - timedelta(days=7)
     end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=2)
+    start_1d = pd.to_datetime(date_list[0]) - timedelta(days=40)
 
     ticker_data_5m: Dict[str, pd.DataFrame] = {}
     ticker_data_1d: Dict[str, pd.DataFrame] = {}
 
-    try:
-        alpaca_key = os.getenv("ALPACA_API_KEY")
-        alpaca_sec = os.getenv("ALPACA_API_SECRET")
-        if alpaca_key and alpaca_sec:
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import StockBarsRequest
-            from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-            from alpaca.data.enums import DataFeed
+    alpaca_key = os.getenv("ALPACA_API_KEY")
+    alpaca_sec = os.getenv("ALPACA_API_SECRET")
+    alp_client = None
+    if alpaca_key and alpaca_sec:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from alpaca.data.enums import DataFeed
+        alp_client = StockHistoricalDataClient(alpaca_key, alpaca_sec)
 
-            alp_client = StockHistoricalDataClient(alpaca_key, alpaca_sec)
-            tf5 = TimeFrame(5, TimeFrameUnit.Minute)
-            req = StockBarsRequest(
-                symbol_or_symbols=all_download_syms,
-                timeframe=tf5,
-                start=start_dt,
-                end=end_dt,
-                feed=DataFeed.IEX
-            )
-            bars_alp = alp_client.get_stock_bars(req)
-            if bars_alp and hasattr(bars_alp, "df") and not bars_alp.df.empty:
-                df_alp = bars_alp.df
-                for sym in all_download_syms:
-                    if sym in df_alp.index.levels[0]:
-                        sub = df_alp.xs(sym).copy()
-                        sub.columns = [c.lower() for c in sub.columns]
-                        if sub.index.tz is not None:
-                            sub.index = sub.index.tz_convert("America/New_York")
-                        else:
-                            sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
-                        ticker_data_5m[sym] = sub
-                print(f"Alpaca successfully fetched 5m candles for {len(ticker_data_5m)} symbols.")
-    except Exception as e:
-        print(f"Notice fetching Alpaca 5m: {e}")
+    # Step 1: Batch download 1D daily bars for candidates to run 7-day volatility screen
+    print(f"Downloading 1D bars for {len(all_candidate_syms)} candidate tickers...")
+    if alp_client:
+        chunk_size = 50
+        for i in range(0, len(all_candidate_syms), chunk_size):
+            chunk = all_candidate_syms[i:i + chunk_size]
+            try:
+                req_1d = StockBarsRequest(
+                    symbol_or_symbols=chunk,
+                    timeframe=TimeFrame(1, TimeFrameUnit.Day),
+                    start=start_1d,
+                    end=end_dt,
+                    feed=DataFeed.IEX
+                )
+                bars_1d = alp_client.get_stock_bars(req_1d)
+                if bars_1d and hasattr(bars_1d, "df") and not bars_1d.df.empty:
+                    df_b = bars_1d.df
+                    for sym in chunk:
+                        if sym in df_b.index.levels[0]:
+                            sub = df_b.xs(sym).copy()
+                            sub.columns = [c.lower() for c in sub.columns]
+                            ticker_data_1d[sym] = sub
+            except Exception as e:
+                print(f"Notice fetching 1D chunk {i}: {e}")
 
-    for sym in all_download_syms:
-        try:
-            if sym not in ticker_data_5m or ticker_data_5m[sym].empty:
-                earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
-                yf_start = max(start_dt, earliest_safe)
-                df_5m = yf.download(sym, start=yf_start.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="5m", progress=False)
-                if not df_5m.empty:
-                    df_5m.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_5m.columns]
-                    if df_5m.index.tz is not None:
-                        df_5m.index = df_5m.index.tz_convert("America/New_York")
-                    else:
-                        df_5m.index = df_5m.index.tz_localize("UTC").tz_convert("America/New_York")
-                    ticker_data_5m[sym] = df_5m
+    # Fallback for SPY and QQQ
+    for sym in ["SPY", "QQQ"] + seed_pool:
+        if sym not in ticker_data_1d:
+            try:
+                df_1d = yf.download(sym, start=start_1d.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="1d", progress=False)
+                if not df_1d.empty:
+                    df_1d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_1d.columns]
+                    ticker_data_1d[sym] = df_1d
+            except Exception:
+                pass
 
-            # 1d bars
-            df_1d = yf.download(sym, start="2026-05-01", end=end_dt.strftime("%Y-%m-%d"), interval="1d", progress=False)
-            if not df_1d.empty:
-                df_1d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_1d.columns]
-                ticker_data_1d[sym] = df_1d
-        except Exception:
-            pass
+    # Step 2: Screen candidate pool across all dates to find which tickers qualify for >= 2% daily volatility
+    qualified_all_dates: Set[str] = set(seed_pool)
+    for d_str in date_list:
+        target_d = pd.to_datetime(d_str).date()
+        for sym in all_candidate_syms:
+            df_1d = ticker_data_1d.get(sym)
+            if df_1d is not None and not df_1d.empty:
+                ok, _, _ = check_7day_consecutive_volatility(sym, target_d, df_1d, min_daily_range_pct=0.020, lookback_days=7)
+                if ok:
+                    qualified_all_dates.add(sym)
+
+    print(f"Dynamically Qualified Universe: {len(qualified_all_dates)} tickers qualify for >= 2% volatility.")
+
+    # Step 3: Batch download 5M intraday bars for qualified universe + SPY + QQQ
+    syms_for_5m = list(dict.fromkeys(list(qualified_all_dates) + ["SPY", "QQQ"]))
+    print(f"Downloading 5M bars for {len(syms_for_5m)} qualified tickers...")
+
+    if alp_client:
+        chunk_size = 40
+        for i in range(0, len(syms_for_5m), chunk_size):
+            chunk = syms_for_5m[i:i + chunk_size]
+            try:
+                req_5m = StockBarsRequest(
+                    symbol_or_symbols=chunk,
+                    timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                    start=start_dt,
+                    end=end_dt,
+                    feed=DataFeed.IEX
+                )
+                bars_5m = alp_client.get_stock_bars(req_5m)
+                if bars_5m and hasattr(bars_5m, "df") and not bars_5m.df.empty:
+                    df_alp = bars_5m.df
+                    for sym in chunk:
+                        if sym in df_alp.index.levels[0]:
+                            sub = df_alp.xs(sym).copy()
+                            sub.columns = [c.lower() for c in sub.columns]
+                            if sub.index.tz is not None:
+                                sub.index = sub.index.tz_convert("America/New_York")
+                            else:
+                                sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
+                            ticker_data_5m[sym] = sub
+            except Exception as e:
+                print(f"Notice fetching 5m chunk {i}: {e}")
+
+    # Fallback for SPY and QQQ if not in ticker_data_5m
+    for sym in ["SPY", "QQQ"]:
+        if sym not in ticker_data_5m or ticker_data_5m[sym].empty:
+            earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
+            yf_start = max(start_dt, earliest_safe)
+            df_5m = yf.download(sym, start=yf_start.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="5m", progress=False)
+            if not df_5m.empty:
+                df_5m.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_5m.columns]
+                if df_5m.index.tz is not None:
+                    df_5m.index = df_5m.index.tz_convert("America/New_York")
+                else:
+                    df_5m.index = df_5m.index.tz_localize("UTC").tz_convert("America/New_York")
+                ticker_data_5m[sym] = df_5m
 
     qqq_5m = ticker_data_5m.get("QQQ")
     initial_portfolio = 100000.0
@@ -488,7 +541,7 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
         max_stop_pct=0.030,
         min_rvol=1.5,
         breakeven_gain_pct=0.010,
-        max_trades_per_day=2,
+        max_trades_per_day=max_trades_per_day,
         require_vwap=True,
         require_rvol=True,
         strategy_label="ZedStrategy_Institutional (V2: WITH VWAP & RVOL)",
@@ -508,7 +561,7 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
         max_stop_pct=0.030,
         min_rvol=1.5,
         breakeven_gain_pct=0.010,
-        max_trades_per_day=2,
+        max_trades_per_day=max_trades_per_day,
         require_vwap=False,
         require_rvol=False,
         strategy_label="ZedStrategy_NoVwapFilter (V3: NO VWAP & RVOL)",
@@ -696,4 +749,5 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "3months"
-    run_comparative_inst_v_backtest(period_mode=mode)
+    max_trades = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    run_comparative_inst_v_backtest(period_mode=mode, max_trades_per_day=max_trades)
