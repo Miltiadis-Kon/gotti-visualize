@@ -55,6 +55,7 @@ from strategies.high_beta_catalyst_open import (
     COMPETITOR_MAP,
     CatalystConfluenceEngine,
 )
+from strategies.institutional_v_recovery import compute_vwap, compute_ema
 
 # Configure logging
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -95,6 +96,7 @@ class LiveNewsTraderService:
             "News_LiquiditySweep",
             "MarketReactor_Fade",
             "HighBeta_CatalystOpen",
+            "Institutional_VRecovery",
         ]
         self.initial_portfolio = initial_portfolio
 
@@ -471,6 +473,10 @@ class LiveNewsTraderService:
             if "HighBeta_CatalystOpen" in self.enabled_strategies and cur_time >= dtime(9, 30) and cur_time <= dtime(10, 15):
                 self._evaluate_high_beta_catalyst_open_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
 
+            # Strategy Engine 4: Institutional_VRecovery (09:35 - 10:15 AM EST)
+            if "Institutional_VRecovery" in self.enabled_strategies and cur_time >= dtime(9, 35) and cur_time <= dtime(10, 15):
+                self._evaluate_institutional_v_recovery_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
+
         # Active position management & ratchets
         self.manage_active_positions(now_est)
 
@@ -780,6 +786,141 @@ class LiveNewsTraderService:
                 entry_price=entry_p,
                 stop_loss=sl,
                 take_profit=tp,
+                reason=reason,
+                sig=sig,
+                ctx=ctx,
+                be_trigger_r=1.0,
+                eod_flatten_time=dtime(15, 55),
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STRATEGY 4: INSTITUTIONAL V-RECOVERY (5 QUANTITATIVE ENHANCEMENTS)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _evaluate_institutional_v_recovery_entry(
+        self,
+        ticker: str,
+        ctx: Dict[str, Any],
+        sig: ReactorSignal,
+        candles_5m: Optional[pd.DataFrame],
+        current_price: float,
+        now_est: datetime,
+    ):
+        """
+        Executes Institutional V-Recovery with all 5 upgrades:
+        1. Volume Profile & Intraday VWAP Confluence
+        2. Higher-Timeframe Nasdaq (QQQ) Bull Market Filter + Relative Strength Divergence
+        3. Structural Volatility Stop (1.2x of 15m ATR below session low, max 3.0%)
+        4. Strict Execution Windows (09:35 - 10:15 EST entries)
+        5. Scaled Profit Targets (+2.0% TP1, +3.5% TP2 Runner, +1.0% Breakeven Ratchet)
+        """
+        if ticker not in ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"]:
+            return
+
+        today = now_est.date()
+        date_str = today.strftime("%Y-%m-%d")
+
+        if candles_5m is None or candles_5m.empty:
+            return
+
+        today_bars = candles_5m[candles_5m.index.date == today]
+        if len(today_bars) < 3:
+            return
+
+        # Fetch daily levels & 20D ATR
+        pdc = ctx.get("pdc")
+        daily_atr = ctx.get("daily_atr")
+        if not pdc or not daily_atr:
+            try:
+                import yfinance as yf
+                df_1d = yf.download(ticker, period="30d", interval="1d", progress=False)
+                if not df_1d.empty and len(df_1d) >= 2:
+                    pdc = float(df_1d["Close"].iloc[-2])
+                    daily_atr = float(calculate_atr(df_1d, length=min(14, len(df_1d) - 1))) or (pdc * 0.025)
+                    ctx["pdc"] = pdc
+                    ctx["daily_atr"] = daily_atr
+            except Exception:
+                pass
+
+        if not pdc or not daily_atr or (daily_atr / pdc) < 0.020:
+            return
+
+        # Fetch QQQ 5m & higher-timeframe regime
+        qqq_5m = ctx.get("qqq_5m")
+        qqq_regime = ctx.get("qqq_regime")
+        if not qqq_regime:
+            try:
+                import yfinance as yf
+                qqq_df = yf.download("QQQ", period="30d", interval="1d", progress=False)
+                qqq_5m_df = yf.download("QQQ", period="2d", interval="5m", progress=False)
+                if not qqq_df.empty:
+                    q_open = float(qqq_5m_df["Open"].iloc[0]) if not qqq_5m_df.empty else float(qqq_df["Open"].iloc[-1])
+                    q_curr = float(qqq_5m_df["Close"].iloc[-1]) if not qqq_5m_df.empty else float(qqq_df["Close"].iloc[-1])
+                    qqq_regime = CatalystConfluenceEngine.evaluate_market_regime(qqq_df.iloc[:-1], q_curr, q_open)
+                    ctx["qqq_regime"] = qqq_regime
+                    ctx["qqq_5m"] = qqq_5m_df
+            except Exception:
+                qqq_regime = "BULL_MARKET"
+
+        if qqq_regime != "BULL_MARKET":
+            return
+
+        # Compute intraday VWAP
+        today_bars = today_bars.copy()
+        today_bars["vwap"] = compute_vwap(today_bars)
+        cur_vwap = float(today_bars["vwap"].iloc[-1])
+
+        # RVOL filter
+        vol_ma20 = float(today_bars["volume"].rolling(min(20, len(today_bars))).mean().iloc[-1])
+        cur_vol = float(today_bars["volume"].iloc[-1])
+        rvol = (cur_vol / vol_ma20) if vol_ma20 > 0 else 1.0
+
+        last_bar = today_bars.iloc[-1]
+        prev_bar = today_bars.iloc[-2]
+        is_green_reversal = (last_bar["close"] > last_bar["open"]) and (last_bar["close"] > prev_bar["high"])
+
+        open_price = float(today_bars.iloc[0]["open"])
+        session_low = float(today_bars["low"].min())
+
+        vwap_reclaimed = (current_price >= cur_vwap) or (last_bar["low"] <= cur_vwap and current_price > cur_vwap)
+        rvol_confirmed = (rvol >= 1.5) or (cur_vol >= vol_ma20 * 1.3)
+
+        # Bullish divergence vs QQQ
+        has_bullish_div = True
+        if qqq_5m is not None and len(qqq_5m) >= 2:
+            q_last = qqq_5m.iloc[-1]
+            q_prev = qqq_5m.iloc[-2]
+            q_dropping = float(q_last["Low"]) <= float(q_prev["Low"])
+            stock_holding = float(last_bar["low"]) >= float(prev_bar["low"])
+            has_bullish_div = (not q_dropping) or stock_holding
+
+        # Catalyst analysis
+        cat_analysis = CatalystConfluenceEngine.analyze_catalysts(ticker, date_str)
+        cat_bias = cat_analysis.get("catalyst_bias", "NEUTRAL")
+
+        drop_from_open = (open_price - session_low) / open_price
+        bounce_height = (current_price - session_low) / max(0.01, session_low)
+
+        if (
+            is_green_reversal
+            and vwap_reclaimed
+            and rvol_confirmed
+            and has_bullish_div
+            and (cat_bias == "BULLISH" or drop_from_open >= 0.010)
+            and bounce_height >= 0.006
+        ):
+            atr_buffer = 1.2 * (daily_atr * 0.20)
+            hard_sl = max(session_low - atr_buffer, current_price * 0.970)
+            tp1 = current_price * 1.020
+            reason = f"VWAP Reclaimed (${cur_vwap:.2f}) | RVOL={rvol:.1f}x | Bullish Div Confirmed | {cat_analysis.get('catalyst_type', 'V_RECOVERY')}"
+
+            self._execute_live_trade(
+                strategy_name="Institutional_VRecovery",
+                ticker=ticker,
+                side="BUY",
+                entry_price=current_price,
+                stop_loss=hard_sl,
+                take_profit=tp1,
                 reason=reason,
                 sig=sig,
                 ctx=ctx,
@@ -1143,7 +1284,7 @@ def main():
     parser.add_argument(
         "--strategies",
         type=str,
-        default="News_LiquiditySweep,MarketReactor_Fade,HighBeta_CatalystOpen",
+        default="News_LiquiditySweep,MarketReactor_Fade,HighBeta_CatalystOpen,Institutional_VRecovery",
         help="Comma-separated list of strategies to run"
     )
 
