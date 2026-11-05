@@ -40,7 +40,7 @@ if BASE_DIR not in sys.path:
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 from lumibot.brokers import Alpaca
-from lumibot.entities import Asset
+from lumibot.entities import Asset, Order
 
 from strategies.market_reactor import (
     get_mysql_connection,
@@ -95,7 +95,7 @@ class LiveNewsTraderService:
         poll_interval_sec: int = 20,
         dry_run: bool = False,
         strategies: Optional[List[str]] = None,
-        initial_portfolio: float = 100000.0,
+        initial_portfolio: float = 1000000.0,
     ):
         self.paper = paper
         self.poll_interval_sec = poll_interval_sec
@@ -162,8 +162,18 @@ class LiveNewsTraderService:
             logger.info("Service started in DRY-RUN mode. Orders will be simulated and logged.")
             return
 
-        api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_PAPER") or os.getenv("ALPACA_KEY_LVL1")
-        api_secret = os.getenv("ALPACA_API_SECRET") or os.getenv("APCA_API_SECRET_KEY_PAPER") or os.getenv("ALPACA_SECRET_LVL1")
+        api_key = (
+            os.getenv("ALPACA_KEY_LVL3")
+            or os.getenv("ALPACA_API_KEY")
+            or os.getenv("APCA_API_KEY_PAPER")
+            or os.getenv("ALPACA_KEY_LVL1")
+        )
+        api_secret = (
+            os.getenv("ALPACA_SECRET_LVL3")
+            or os.getenv("ALPACA_API_SECRET")
+            or os.getenv("APCA_API_SECRET_KEY_PAPER")
+            or os.getenv("ALPACA_SECRET_LVL1")
+        )
 
         if not api_key or not api_secret:
             logger.warning("No Alpaca API credentials found in environment. Defaulting to DRY-RUN mode.")
@@ -183,9 +193,11 @@ class LiveNewsTraderService:
             self.portfolio_value = float(acct.portfolio_value or self.initial_portfolio)
             self.buying_power = float(acct.buying_power or self.initial_portfolio)
             mode_str = "PAPER" if self.paper else "LIVE"
+            etf_name = os.getenv("ETF_NAME", "Level 3: Diamond Hands ETF")
             logger.info(
-                f"[Alpaca Connected] Mode: {mode_str} | Account: {self.account_id} | "
-                f"Portfolio: ${self.portfolio_value:,.2f} | Buying Power: ${self.buying_power:,.2f}"
+                f"[Alpaca Connected] Strategy Engine: {etf_name} | Mode: {mode_str} | "
+                f"Account: {self.account_id} | Portfolio: ${self.portfolio_value:,.2f} | "
+                f"Buying Power: ${self.buying_power:,.2f}"
             )
         except Exception as e:
             logger.error(f"Failed to connect to Alpaca API: {e}. Falling back to DRY-RUN mode.")
@@ -394,6 +406,7 @@ class LiveNewsTraderService:
         pdh = None
         pdl = None
         pdc = None
+        is_qualified_zed = False
 
         try:
             # Query bars via Alpaca or YFinance
@@ -422,7 +435,6 @@ class LiveNewsTraderService:
                 daily_atr = float(calculate_atr(df, length=min(14, len(df) - 1))) or (pdc * 0.02)
 
             # Dynamic 7-day consecutive volatility pre-qualification across broad universe
-            is_qualified_zed = False
             if df is not None and not df.empty and len(df) >= 7:
                 now_d = datetime.now(self.tz_est).date()
                 ok_zed, avg_r, _ = check_7day_consecutive_volatility(
@@ -520,7 +532,13 @@ class LiveNewsTraderService:
             else:
                 df.index = df.index.tz_localize("UTC").tz_convert(self.tz_est)
 
-            df_15m = df.resample("15min").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+            # Explicit column resampling to avoid pandas NDFrame.first() offset error
+            o = df["open"].resample("15min").first()
+            h = df["high"].resample("15min").max()
+            l = df["low"].resample("15min").min()
+            c = df["close"].resample("15min").last()
+            v = df["volume"].resample("15min").sum()
+            df_15m = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
             return df, df_15m
         except Exception as e:
             logger.warning(f"Error fetching candles for {ticker}: {e}")
@@ -1024,19 +1042,33 @@ class LiveNewsTraderService:
         alpaca_order_id = None
         if self.broker and not self.dry_run:
             try:
-                asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
-                # Bracket order: market entry with bracket TP & SL
-                order = self.broker.create_order(
-                    asset=asset,
-                    quantity=qty,
-                    side=side.lower(),
-                    type="market",
-                    take_profit_price=take_profit,
-                    stop_loss_price=stop_loss,
-                )
-                submitted = self.broker.submit_order(order)
-                alpaca_order_id = str(getattr(submitted, "id", pos_id))
-                logger.info(f"[Alpaca Fill] Bracket order registered with ID: {alpaca_order_id}")
+                # Direct Alpaca REST API bracket order (native & robust)
+                if hasattr(self.broker, "api") and self.broker.api:
+                    submitted = self.broker.api.submit_order(
+                        symbol=ticker,
+                        qty=qty,
+                        side=side.lower(),
+                        type="market",
+                        time_in_force="day",
+                        order_class="bracket",
+                        take_profit={"limit_price": round(take_profit, 2)},
+                        stop_loss={"stop_price": round(stop_loss, 2)},
+                    )
+                    alpaca_order_id = str(getattr(submitted, "id", pos_id))
+                    logger.info(f"[Alpaca REST Fill] Bracket order registered with ID: {alpaca_order_id}")
+                else:
+                    asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
+                    order = Order(
+                        asset=asset,
+                        quantity=qty,
+                        side=side.lower(),
+                        type="market",
+                        take_profit_price=round(take_profit, 2),
+                        stop_loss_price=round(stop_loss, 2),
+                    )
+                    submitted = self.broker.submit_order(order)
+                    alpaca_order_id = str(getattr(submitted, "id", pos_id))
+                    logger.info(f"[Alpaca Lumibot Fill] Bracket order registered with ID: {alpaca_order_id}")
             except Exception as e:
                 logger.error(f"[Alpaca Order Error] Could not submit order: {e}")
 
@@ -1213,9 +1245,18 @@ class LiveNewsTraderService:
         # Cancel open orders and close via Alpaca
         if self.broker and not self.dry_run:
             try:
-                asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
-                self.broker.cancel_open_orders()
-                self.broker.close_position(asset)
+                if hasattr(self.broker, "api") and self.broker.api:
+                    try:
+                        self.broker.api.cancel_orders()
+                    except Exception:
+                        pass
+                    try:
+                        self.broker.api.close_position(ticker)
+                    except Exception:
+                        pass
+                else:
+                    asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
+                    self.broker.close_position(asset)
             except Exception as e:
                 logger.warning(f"Notice closing position via broker: {e}")
 
