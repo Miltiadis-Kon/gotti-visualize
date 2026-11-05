@@ -54,7 +54,7 @@ from strategies.trade_tracker import TradeTracker
 logger = logging.getLogger("HighBetaCatalystOpen")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. COMPETITOR & PEER NETWORK MAPPING
+# 1. COMPETITOR & PEER NETWORK MAPPING & 7-DAY VOLATILITY SCANNER
 # ─────────────────────────────────────────────────────────────────────────────
 
 COMPETITOR_MAP: Dict[str, List[str]] = {
@@ -70,6 +70,74 @@ COMPETITOR_MAP: Dict[str, List[str]] = {
     "GOOGL": ["MSFT", "META", "AMZN", "AAPL"],
     "AMZN": ["MSFT", "GOOGL", "BABA", "SHOP"],
 }
+
+
+def check_7day_consecutive_volatility(
+    ticker: str,
+    target_date: date,
+    df_1d: Optional[pd.DataFrame],
+    min_daily_range_pct: float = 0.020,
+    lookback_days: int = 7,
+) -> Tuple[bool, float, List[float]]:
+    """
+    Step 1 Rulebook Filter (ZedStrategy):
+    Verifies that a stock moved >= 2.0% daily ((high - low) / low >= 0.020)
+    for 7 consecutive trading days in a row prior to target_date.
+    Returns:
+        - is_qualified: bool (True only if all 7 consecutive days meet or exceed threshold)
+        - avg_range: float (mean daily range over the 7 days)
+        - daily_ranges: List[float] (daily range percentage for each day in lookback)
+    """
+    if df_1d is None or df_1d.empty:
+        return False, 0.0, []
+
+    # Filter for completed daily bars strictly prior to target_date (no lookahead)
+    if isinstance(df_1d.index, pd.DatetimeIndex):
+        prior_days = df_1d[df_1d.index.date < target_date]
+    else:
+        prior_days = df_1d
+
+    if len(prior_days) < lookback_days:
+        return False, 0.0, []
+
+    recent_7 = prior_days.iloc[-lookback_days:]
+    daily_ranges = []
+
+    for idx in range(len(recent_7)):
+        row = recent_7.iloc[idx]
+        h = float(row["high"])
+        l = float(row["low"])
+        rng = (h - l) / l if l > 0 else 0.0
+        daily_ranges.append(rng)
+        if rng < min_daily_range_pct:
+            return False, float(np.mean(daily_ranges)), daily_ranges
+
+    avg_rng = float(np.mean(daily_ranges))
+    return True, avg_rng, daily_ranges
+
+
+def scan_premarket_7day_volatility_universe(
+    target_date: date,
+    candidate_tickers: List[str],
+    ticker_data_1d: Dict[str, pd.DataFrame],
+    min_daily_range_pct: float = 0.020,
+    lookback_days: int = 7,
+) -> List[str]:
+    """
+    Dynamic Pre-Market Universe Expansion:
+    Scans candidate tickers and returns only those that exhibited >= 2.0% daily range
+    for 7 consecutive trading days prior to the session.
+    """
+    qualified_universe = []
+    for sym in candidate_tickers:
+        df_1d = ticker_data_1d.get(sym)
+        if df_1d is not None and not df_1d.empty:
+            ok, avg_r, _ = check_7day_consecutive_volatility(
+                sym, target_date, df_1d, min_daily_range_pct, lookback_days
+            )
+            if ok:
+                qualified_universe.append(sym)
+    return qualified_universe
 
 
 class CatalystConfluenceEngine:
@@ -207,15 +275,18 @@ class CatalystConfluenceEngine:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. HIGH-BETA CATALYST OPEN STRATEGY
+# 2. ZED STRATEGY (HIGH-BETA CATALYST OPEN)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class HighBetaCatalystOpenStrategy(StrategyBaseplate):
+class ZedStrategy(StrategyBaseplate):
     """
-    High-Beta Catalyst Opening Strategy:
-    Combines direct & competitor news sentiment with Nasdaq higher-timeframe regime
-    to trade the 30-minute market open patterns (Golden V-Shape, Straight Rally,
-    Bear False Recovery, and Forensic Higher-Low Bull Flag).
+    ZedStrategy (High-Beta Catalyst Opening Strategy):
+    Codifies Zed Monopoly's 5-step rulebook, 7-day consecutive volatility screen,
+    and catalyst confluence matrix across 4 market-open patterns:
+    - Pattern 1: Golden V-Shape PDC Rebound
+    - Pattern 2: Straight Rally Breakout
+    - Pattern 3: Bear False Recovery Breakdown
+    - Pattern 4: Forensic COIN Higher-Low Bull Flag
     """
 
     parameters: Dict[str, Any] = {
@@ -229,6 +300,8 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
         "TakeProfitPct": 0.020,               # Mechanical +2.0% Take-Profit limit
         "StopLossPct": 0.035,                 # Mechanical -3.5% Stop-Loss (PDF rule: 3% to 4%)
         "MinBetaATR": 0.025,                  # 20-day ATR% >= 2.5% high-beta screen
+        "MinDailyRangePct": 0.020,            # 2.0%+ daily volatility
+        "Require7DayVolatility": True,        # 7 consecutive days >= 2.0% daily range
         "EnableScaleIn": True,                # Forensic COIN 2-tranche scale-in
         "Tranche1Pct": 0.60,                  # Lot 1: 60% position size (e.g. 220 shares)
         "Tranche2Pct": 0.40,                  # Lot 2: 40% position size on flag dip (e.g. 130 shares)
@@ -243,6 +316,8 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
         self.tp_pct = float(self.parameters.get("TakeProfitPct", 0.020))
         self.sl_pct = float(self.parameters.get("StopLossPct", 0.035))
         self.min_beta_atr = float(self.parameters.get("MinBetaATR", 0.025))
+        self.min_daily_range_pct = float(self.parameters.get("MinDailyRangePct", 0.020))
+        self.require_7day_vol = bool(self.parameters.get("Require7DayVolatility", True))
         self.enable_scale_in = bool(self.parameters.get("EnableScaleIn", True))
         self.tranche1_ratio = float(self.parameters.get("Tranche1Pct", 0.60))
         self.tranche2_ratio = float(self.parameters.get("Tranche2Pct", 0.40))
@@ -324,7 +399,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
         self._calculate_daily_levels_and_beta()
 
     def _calculate_daily_levels_and_beta(self):
-        """Validates 20-day ATR% >= 2.5% and extracts Previous Day Close (PDC)."""
+        """Validates 20-day ATR% >= 2.5%, 7-day consecutive volatility >= 2.0%, and extracts Previous Day Close (PDC)."""
         ticker = self.parameters["Ticker"]
         try:
             bars_1d = self.get_historical_prices(ticker, 25, "day")
@@ -335,9 +410,21 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
                     self.daily_atr = float(calculate_atr(df, length=min(20, len(df) - 1)))
                     atr_pct = self.daily_atr / self.prev_close
                     self.is_high_beta = (atr_pct >= self.min_beta_atr)
+
+                    # 7-Day Consecutive Volatility Check
+                    is_7d_vol, avg_7d_rng, _ = check_7day_consecutive_volatility(
+                        ticker.symbol,
+                        self.current_session_date,
+                        df,
+                        min_daily_range_pct=self.min_daily_range_pct,
+                        lookback_days=7
+                    )
+                    if self.require_7day_vol and not is_7d_vol:
+                        self.is_high_beta = False
+
                     self.log_message(
                         f"[{ticker.symbol}] PDC=${self.prev_close:.2f} | 20D ATR=${self.daily_atr:.2f} "
-                        f"({atr_pct:.1%}) -> High-Beta Verified: {self.is_high_beta}"
+                        f"({atr_pct:.1%}) | 7D Volatility ({avg_7d_rng:.1%}): {is_7d_vol} -> Qualified: {self.is_high_beta}"
                     )
         except Exception as e:
             self.log_message(f"Notice calculating daily levels: {e}")
@@ -373,11 +460,15 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
 
         # ── 1. ACTIVE POSITION MANAGEMENT & EXITS ────────────────────────────
         if self.active_position_side is not None:
-            self._manage_active_trade(current_price, cur_time)
+            self._manage_zed_strategy_trade(current_price, cur_time)
             return
 
         # Max 1 trade per session
         if self.trades_taken_today >= 1:
+            return
+
+        # Require high beta & 7-day volatility qualification
+        if not self.is_high_beta:
             return
 
         # ── 2. MARKET REGIME FILTER (NASDAQ COMPOSITE / QQQ) ─────────────────
@@ -395,11 +486,11 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
 
         # ── 3. PATTERN DETECTION & CONFLUENCE TRIGGER (09:30 - 10:15 EST) ─────
         if time(9, 30) <= cur_time < time(10, 15):
-            self._evaluate_opening_patterns(current_price, cur_time)
+            self._evaluate_zed_strategy_entry(current_price, cur_time)
 
-    def _evaluate_opening_patterns(self, p: float, t: time):
+    def _evaluate_zed_strategy_entry(self, p: float, t: time):
         """
-        Evaluates the 4 Opening Patterns based on Catalyst Confluence & Nasdaq Regime.
+        Evaluates the 4 Opening Patterns based on Catalyst Confluence & Nasdaq Regime (ZedStrategy).
         """
         if self.open_price is None or self.prev_close is None:
             return
@@ -431,7 +522,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
         if self.market_regime == "BULL_MARKET" and cat_bias == "BULLISH":
             # Stock surges right off the bell without waiting for a deep V-dip
             if gain_from_open >= 0.010 and is_green_reversal and t <= time(9, 45):
-                self._execute_entry(
+                self._execute_zed_strategy_entry(
                     side="BUY",
                     price=p,
                     pattern="PATTERN_2_STRAIGHT_RALLY_BREAKOUT",
@@ -449,7 +540,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
             tested_pdc = (drop_from_open >= 0.008 and abs(p - pdc) / pdc <= 0.007) or (p <= pdc and drop_from_open >= 0.010)
             if tested_pdc and is_green_reversal:
                 self.v_bottom_price = float(df_5m["low"].min())
-                self._execute_entry(
+                self._execute_zed_strategy_entry(
                     side="BUY",
                     price=p,
                     pattern="PATTERN_1_GOLDEN_V_SHAPE_PDC_REBOUND",
@@ -475,7 +566,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
                 is_higher_low = (last_bar["low"] >= lowest_low * 1.006) and (p < highest_high)
                 if is_higher_low and is_green_reversal:
                     self.higher_low_price = float(last_bar["low"])
-                    self._execute_entry(
+                    self._execute_zed_strategy_entry(
                         side="BUY",
                         price=p,
                         pattern="PATTERN_4_FORENSIC_COIN_V_RECOVERY_BULL_FLAG",
@@ -495,7 +586,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
                 attempted_recovery = (self.session_high < self.open_price * 1.003) and (self.session_high > self.session_low * 1.004)
                 breaks_morning_low = (p < self.session_low) and is_red_breakdown
                 if attempted_recovery and breaks_morning_low:
-                    self._execute_entry(
+                    self._execute_zed_strategy_entry(
                         side="SELL",
                         price=p,
                         pattern="PATTERN_3_BEAR_FALSE_RECOVERY_BREAKDOWN",
@@ -509,7 +600,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
     # 4. ORDER SIZING & SCALE-IN EXECUTION
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _execute_entry(
+    def _execute_zed_strategy_entry(
         self,
         side: str,
         price: float,
@@ -518,7 +609,7 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
         tp_price: float,
         reason: str
     ):
-        """Calculates lot sizing, submits primary tranche, and arms scale-in tranche."""
+        """Calculates lot sizing, submits primary tranche, and arms scale-in tranche (ZedStrategy)."""
         portfolio = self.get_portfolio_value()
         risk_per_share = abs(price - sl_price)
         if risk_per_share <= 0:
@@ -567,8 +658,8 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
     # 5. ACTIVE TRADE MONITORING, SCALE-IN & EOD FLATTEN
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _manage_active_trade(self, current_price: float, cur_time: time):
-        """Monitors scale-in dips, breakeven stop ratchets, and 15:55 EST EOD flattening."""
+    def _manage_zed_strategy_trade(self, current_price: float, cur_time: time):
+        """Monitors scale-in dips, breakeven stop ratchets, and 15:55 EST EOD flattening (ZedStrategy)."""
         ticker = self.parameters["Ticker"]
         entry_p = self.entry_price or current_price
 
@@ -635,3 +726,12 @@ class HighBetaCatalystOpenStrategy(StrategyBaseplate):
                 self.log_message(f"🛑 [STOP LOSS HIT] {ticker.symbol} short stopped at ${current_price:.2f} ({gain_pct:.2%}).")
                 self.close_position(ticker)
                 self.active_position_side = None
+
+    # Backward compatibility aliases
+    _evaluate_opening_patterns = _evaluate_zed_strategy_entry
+    _execute_entry = _execute_zed_strategy_entry
+    _manage_active_trade = _manage_zed_strategy_trade
+
+
+# Backward compatibility class alias
+HighBetaCatalystOpenStrategy = ZedStrategy

@@ -64,9 +64,10 @@ def compute_ema(series: pd.Series, period: int = 9) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
-class InstitutionalVRecoveryStrategy(StrategyBaseplate):
+class ZedInstitutionalStrategy(StrategyBaseplate):
     """
-    Institutional V-Recovery Strategy implementing VWAP, RVOL >= 1.5,
+    ZedInstitutionalStrategy (Institutional V-Recovery Strategy):
+    Upgrades Zed Monopoly's V-shape momentum strategy by implementing VWAP, RVOL >= 1.5,
     Index Relative Strength Divergence, Dynamic ATR Stops, Time Stops (11:00 EST),
     and 2-Tier Scaled Exits (50% at +2.0%, 50% trailing EMA-9).
     """
@@ -85,6 +86,7 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
         "MaxStopLossPct": 0.030,              # Max 3.0% structural stop
         "MinRvol": 1.5,                       # RVOL >= 1.5x of 20-period volume MA
         "RequireVwapReclaim": True,           # Must hold or cross above intraday VWAP
+        "RequireRvol": True,                  # Must satisfy RVOL threshold
         "RequireIndexDivergence": True,        # Bullish divergence vs QQQ
         "EnforceMarketRegime": True,          # Higher-timeframe Bull Market Filter
         "BreakevenGainPct": 0.010,            # Ratchet stop to entry at +1.0% gain
@@ -100,6 +102,7 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
         self.max_stop_pct = float(self.parameters.get("MaxStopLossPct", 0.030))
         self.min_rvol = float(self.parameters.get("MinRvol", 1.5))
         self.require_vwap = bool(self.parameters.get("RequireVwapReclaim", True))
+        self.require_rvol = bool(self.parameters.get("RequireRvol", True))
         self.require_div = bool(self.parameters.get("RequireIndexDivergence", True))
         self.enforce_regime = bool(self.parameters.get("EnforceMarketRegime", True))
         self.be_gain = float(self.parameters.get("BreakevenGainPct", 0.010))
@@ -210,7 +213,7 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
 
         # ── 1. ACTIVE POSITION MANAGEMENT & EXITS ────────────────────────────
         if self.active_position_side is not None:
-            self._manage_active_trade(current_price, cur_time)
+            self._manage_zed_institutional_trade(current_price, cur_time)
             return
 
         # Max 1 trade per session
@@ -220,10 +223,10 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
         # ── 2. STRICT ENTRY WINDOW (09:35 - 10:15 EST) ───────────────────────
         # Note: 09:30 - 09:35 is the opening auction bar; entries begin at 09:35!
         if time(9, 35) <= cur_time <= time(10, 15):
-            self._evaluate_institutional_v_entry(current_price, cur_time)
+            self._evaluate_zed_institutional_entry(current_price, cur_time)
 
-    def _evaluate_institutional_v_entry(self, p: float, t: time):
-        """Evaluates entry triggers with VWAP, RVOL >= 1.5, and QQQ Relative Strength."""
+    def _evaluate_zed_institutional_entry(self, p: float, t: time):
+        """Evaluates entry triggers with VWAP, RVOL >= 1.5, and QQQ Relative Strength (ZedInstitutionalStrategy)."""
         ticker = self.parameters["Ticker"]
         qqq_asset = self.parameters.get("MarketBenchmark", Asset("QQQ", Asset.AssetType.STOCK))
 
@@ -250,9 +253,9 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
         prev_bar = df_5m.iloc[-2]
         is_green_reversal = (last_bar["close"] > last_bar["open"]) and (last_bar["close"] > prev_bar["high"])
 
-        # Enhancement 1: VWAP Reclaim & RVOL >= 1.5
-        vwap_reclaimed = (p >= cur_vwap) or (last_bar["low"] <= cur_vwap and last_bar["close"] > cur_vwap)
-        rvol_confirmed = (rvol >= self.min_rvol) or (cur_volume >= vol_ma20 * 1.3)
+        # Enhancement 1: VWAP Reclaim & RVOL >= 1.5 (Configurable for V2 vs V3)
+        vwap_reclaimed = True if not self.require_vwap else ((p >= cur_vwap) or (last_bar["low"] <= cur_vwap and last_bar["close"] > cur_vwap))
+        rvol_confirmed = True if (not self.require_rvol or self.min_rvol <= 0) else ((rvol >= self.min_rvol) or (cur_volume >= vol_ma20 * 1.3))
 
         # Enhancement 2: Bullish Divergence vs QQQ
         has_bullish_divergence = True
@@ -289,7 +292,7 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
             tp1 = p * (1.0 + self.target1_pct)
             tp2 = p * (1.0 + self.target2_pct)
 
-            self._execute_institutional_entry(
+            self._execute_zed_institutional_entry(
                 price=p,
                 stop_loss=hard_sl,
                 tp1=tp1,
@@ -303,7 +306,7 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
     # 4. ORDER EXECUTION & 2-TIER SCALED SIZING
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _execute_institutional_entry(
+    def _execute_zed_institutional_entry(
         self,
         price: float,
         stop_loss: float,
@@ -351,7 +354,7 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
     # 5. ACTIVE TRADE MONITORING, SCALE-OUT & TIME STOP (11:00 EST)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _manage_active_trade(self, current_price: float, cur_time: time):
+    def _manage_zed_institutional_trade(self, current_price: float, cur_time: time):
         ticker = self.parameters["Ticker"]
         entry_p = self.entry_price or current_price
 
@@ -408,3 +411,28 @@ class InstitutionalVRecoveryStrategy(StrategyBaseplate):
             self.close_position(ticker)
             self.active_position_side = None
             return
+
+    # Backward compatibility aliases
+    _evaluate_institutional_v_entry = _evaluate_zed_institutional_entry
+    _execute_institutional_entry = _execute_zed_institutional_entry
+    _manage_active_trade = _manage_zed_institutional_trade
+
+
+class ZedNoVwapStrategy(ZedInstitutionalStrategy):
+    """
+    ZedNoVwapStrategy (Version 3 of ZedStrategy):
+    Ablation variant removing VWAP Reclaim and RVOL confirmation filters
+    to test the impact on trade frequency, win rate, and drawdown.
+    """
+    parameters: Dict[str, Any] = {
+        **ZedInstitutionalStrategy.parameters,
+        "RequireVwapReclaim": False,
+        "RequireRvol": False,
+        "MinRvol": 0.0,
+    }
+
+
+# Backward compatibility aliases
+InstitutionalVRecoveryStrategy = ZedInstitutionalStrategy
+ZedStrategyInstitutional = ZedInstitutionalStrategy
+ZedStrategyNoVwap = ZedNoVwapStrategy

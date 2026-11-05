@@ -54,8 +54,16 @@ from services.signal_observer import RealTimeSignalObserver
 from strategies.high_beta_catalyst_open import (
     COMPETITOR_MAP,
     CatalystConfluenceEngine,
+    ZedStrategy,
+    check_7day_consecutive_volatility,
+    scan_premarket_7day_volatility_universe,
 )
-from strategies.institutional_v_recovery import compute_vwap, compute_ema
+from strategies.institutional_v_recovery import (
+    compute_vwap,
+    compute_ema,
+    ZedInstitutionalStrategy,
+    ZedNoVwapStrategy,
+)
 
 # Configure logging
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -95,6 +103,8 @@ class LiveNewsTraderService:
         self.enabled_strategies = strategies or [
             "News_LiquiditySweep",
             "MarketReactor_Fade",
+            "ZedStrategy",
+            "ZedInstitutionalStrategy",
             "HighBeta_CatalystOpen",
             "Institutional_VRecovery",
         ]
@@ -115,6 +125,7 @@ class LiveNewsTraderService:
         self.active_watchlist: Dict[str, Dict[str, Any]] = {}  # ticker -> technical levels & context
         self.active_positions: Dict[str, Dict[str, Any]] = {}  # pos_id -> position details
         self.daily_completed_trades: List[Dict[str, Any]] = []
+        self.qualified_7day_volatility_tickers: Set[str] = set()
 
         self.current_session_date: Optional[date] = None
 
@@ -271,6 +282,7 @@ class LiveNewsTraderService:
             self.current_session_date = today
             self.active_watchlist.clear()
             self.daily_completed_trades.clear()
+            self.qualified_7day_volatility_tickers.clear()
             self._load_premarket_signals_for_today(today)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -469,13 +481,13 @@ class LiveNewsTraderService:
             if "MarketReactor_Fade" in self.enabled_strategies and sig.selector_id == 2 and cur_time >= dtime(9, 45) and cur_time < dtime(15, 55):
                 self._evaluate_market_reactor_fade_entry(ticker, ctx, sig, candles_5m, current_price)
 
-            # Strategy Engine 3: HighBeta_CatalystOpen (09:30 - 10:15 AM EST)
-            if "HighBeta_CatalystOpen" in self.enabled_strategies and cur_time >= dtime(9, 30) and cur_time <= dtime(10, 15):
-                self._evaluate_high_beta_catalyst_open_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
+            # Strategy Engine 3: ZedStrategy / HighBeta_CatalystOpen (09:30 - 10:15 AM EST)
+            if any(s in self.enabled_strategies for s in ("ZedStrategy", "HighBeta_CatalystOpen")) and cur_time >= dtime(9, 30) and cur_time <= dtime(10, 15):
+                self._evaluate_zed_strategy_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
 
-            # Strategy Engine 4: Institutional_VRecovery (09:35 - 10:15 AM EST)
-            if "Institutional_VRecovery" in self.enabled_strategies and cur_time >= dtime(9, 35) and cur_time <= dtime(10, 15):
-                self._evaluate_institutional_v_recovery_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
+            # Strategy Engine 4: ZedInstitutionalStrategy / Institutional_VRecovery (09:35 - 10:15 AM EST)
+            if any(s in self.enabled_strategies for s in ("ZedInstitutionalStrategy", "ZedNoVwapStrategy", "Institutional_VRecovery")) and cur_time >= dtime(9, 35) and cur_time <= dtime(10, 15):
+                self._evaluate_zed_institutional_entry(ticker, ctx, sig, candles_5m, current_price, now_est)
 
         # Active position management & ratchets
         self.manage_active_positions(now_est)
@@ -680,10 +692,10 @@ class LiveNewsTraderService:
             )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STRATEGY 3: HIGH-BETA CATALYST OPENING STRATEGY
+    # STRATEGY 3: ZED STRATEGY (HIGH-BETA CATALYST OPENING)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _evaluate_high_beta_catalyst_open_entry(
+    def _evaluate_zed_strategy_entry(
         self,
         ticker: str,
         ctx: Dict[str, Any],
@@ -693,17 +705,38 @@ class LiveNewsTraderService:
         now_est: datetime,
     ):
         """
-        Executes the 5-step rulebook across high-beta equities:
-        Evaluates Catalyst Confluence (> 4 or < 2 on stock/peers), Nasdaq (QQQ) regime,
-        and trades Pattern 1 (Golden V-Shape), Pattern 2 (Straight Rally), Pattern 3
-        (Bear False Recovery), or Pattern 4 (Forensic Bull Flag).
+        Executes ZedStrategy 5-step rulebook across high-beta equities:
+        1. 7-Day Consecutive Volatility Screen (moves >= 2.0% daily 7 days in a row)
+        2. Higher-timeframe Nasdaq Composite (QQQ) regime
+        3. 30-minute market open patterns (Golden V-Shape, Straight Rally, Bear False Recovery, Bull Flag)
+        4. Catalyst Confluence (> 4 or < 2 on stock/peers)
+        5. Mechanical +2.0% Take Profit, -3.5% Stop Loss, +1.0% Breakeven Ratchet
         """
-        high_beta_tickers = {"COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"}
+        # Step 1: Verify 7-Day Consecutive Volatility Screen
+        if ticker not in self.qualified_7day_volatility_tickers:
+            try:
+                import yfinance as yf
+                df_1d = yf.download(ticker, period="30d", interval="1d", progress=False)
+                if not df_1d.empty:
+                    df_1d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_1d.columns]
+                    is_ok, avg_r, _ = check_7day_consecutive_volatility(
+                        ticker, now_est.date(), df_1d, min_daily_range_pct=0.020, lookback_days=7
+                    )
+                    if is_ok:
+                        self.qualified_7day_volatility_tickers.add(ticker)
+                        logger.info(f"[{ticker}] PASSED 7-Day Volatility Screen ({avg_r:.2%}) -> Active in ZedStrategy universe.")
+                    else:
+                        logger.debug(f"[{ticker}] FAILED 7-Day Volatility Screen ({avg_r:.2%}) -> Skipped.")
+                        return
+                else:
+                    return
+            except Exception as e:
+                logger.warning(f"Notice checking 7-day volatility for {ticker}: {e}")
+                if ticker not in {"COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"}:
+                    return
+
         pdc = ctx.get("pdc")
         daily_atr = ctx.get("daily_atr", current_price * 0.025)
-        atr_pct = (daily_atr / pdc) if pdc else 0.025
-        if ticker not in high_beta_tickers and atr_pct < 0.020:
-            return
 
         today_bars = df_5m[df_5m.index.date == now_est.date()]
         if len(today_bars) < 2:
@@ -780,7 +813,7 @@ class LiveNewsTraderService:
         if trigger_setup:
             side, entry_p, sl, tp, reason = trigger_setup
             self._execute_live_trade(
-                strategy_name="HighBeta_CatalystOpen",
+                strategy_name="ZedStrategy",
                 ticker=ticker,
                 side=side,
                 entry_price=entry_p,
@@ -793,11 +826,14 @@ class LiveNewsTraderService:
                 eod_flatten_time=dtime(15, 55),
             )
 
+    # Backward compatibility alias
+    _evaluate_high_beta_catalyst_open_entry = _evaluate_zed_strategy_entry
+
     # ─────────────────────────────────────────────────────────────────────────
-    # STRATEGY 4: INSTITUTIONAL V-RECOVERY (5 QUANTITATIVE ENHANCEMENTS)
+    # STRATEGY 4: ZED INSTITUTIONAL V-RECOVERY (5 QUANTITATIVE ENHANCEMENTS)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _evaluate_institutional_v_recovery_entry(
+    def _evaluate_zed_institutional_entry(
         self,
         ticker: str,
         ctx: Dict[str, Any],
@@ -807,15 +843,32 @@ class LiveNewsTraderService:
         now_est: datetime,
     ):
         """
-        Executes Institutional V-Recovery with all 5 upgrades:
-        1. Volume Profile & Intraday VWAP Confluence
-        2. Higher-Timeframe Nasdaq (QQQ) Bull Market Filter + Relative Strength Divergence
-        3. Structural Volatility Stop (1.2x of 15m ATR below session low, max 3.0%)
-        4. Strict Execution Windows (09:35 - 10:15 EST entries)
+        Executes ZedInstitutionalStrategy with all 5 upgrades:
+        1. 7-Day Consecutive Volatility Screen (>= 2.0% daily)
+        2. Volume Profile & Intraday VWAP Confluence
+        3. Higher-Timeframe Nasdaq (QQQ) Bull Market Filter + Relative Strength Divergence
+        4. Structural Volatility Stop (1.2x of 15m ATR below session low, max 3.0%)
         5. Scaled Profit Targets (+2.0% TP1, +3.5% TP2 Runner, +1.0% Breakeven Ratchet)
         """
-        if ticker not in ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"]:
-            return
+        # Step 1: 7-Day Volatility Qualification
+        if ticker not in self.qualified_7day_volatility_tickers:
+            try:
+                import yfinance as yf
+                df_1d = yf.download(ticker, period="30d", interval="1d", progress=False)
+                if not df_1d.empty:
+                    df_1d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_1d.columns]
+                    is_ok, avg_r, _ = check_7day_consecutive_volatility(
+                        ticker, now_est.date(), df_1d, min_daily_range_pct=0.020, lookback_days=7
+                    )
+                    if is_ok:
+                        self.qualified_7day_volatility_tickers.add(ticker)
+                    else:
+                        return
+                else:
+                    return
+            except Exception:
+                if ticker not in {"COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"}:
+                    return
 
         today = now_est.date()
         date_str = today.strftime("%Y-%m-%d")
@@ -915,7 +968,7 @@ class LiveNewsTraderService:
             reason = f"VWAP Reclaimed (${cur_vwap:.2f}) | RVOL={rvol:.1f}x | Bullish Div Confirmed | {cat_analysis.get('catalyst_type', 'V_RECOVERY')}"
 
             self._execute_live_trade(
-                strategy_name="Institutional_VRecovery",
+                strategy_name="ZedInstitutionalStrategy",
                 ticker=ticker,
                 side="BUY",
                 entry_price=current_price,
@@ -927,6 +980,9 @@ class LiveNewsTraderService:
                 be_trigger_r=1.0,
                 eod_flatten_time=dtime(15, 55),
             )
+
+    # Backward compatibility alias
+    _evaluate_institutional_v_recovery_entry = _evaluate_zed_institutional_entry
 
     # ─────────────────────────────────────────────────────────────────────────
     # 4. LIVE ORDER EXECUTION & DB ORDERS SYNCHRONIZATION
@@ -1284,7 +1340,7 @@ def main():
     parser.add_argument(
         "--strategies",
         type=str,
-        default="News_LiquiditySweep,MarketReactor_Fade,HighBeta_CatalystOpen,Institutional_VRecovery",
+        default="News_LiquiditySweep,MarketReactor_Fade,ZedStrategy,ZedInstitutionalStrategy,HighBeta_CatalystOpen,Institutional_VRecovery",
         help="Comma-separated list of strategies to run"
     )
 

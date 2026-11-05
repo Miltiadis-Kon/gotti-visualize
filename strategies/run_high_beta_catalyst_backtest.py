@@ -33,19 +33,22 @@ from strategies.market_reactor import fetch_reactor_signals, ReactorSignal, get_
 from strategies.high_beta_catalyst_open import (
     COMPETITOR_MAP,
     CatalystConfluenceEngine,
+    ZedStrategy,
     HighBetaCatalystOpenStrategy,
+    check_7day_consecutive_volatility,
+    scan_premarket_7day_volatility_universe,
 )
 from strategies.risk_management import calculate_atr
 from strategies.run_combined_news_backtest import simulate_strategy_engine
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("HighBetaBacktest")
+logger = logging.getLogger("ZedStrategyBacktest")
 
-# Target High-Beta Universe (moves 2%+ daily, high volatility)
-HIGH_BETA_UNIVERSE = ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"]
+# Target High-Beta Universe (seed universe expanded dynamically each morning via 7-day volatility scanner)
+HIGH_BETA_UNIVERSE = ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR", "SMCI", "RBLX", "RIOT", "CLSK", "AAPL", "MSFT"]
 
 
-def simulate_high_beta_catalyst_engine(
+def simulate_zed_strategy_engine(
     date_list: List[str],
     all_eligible_signals: List[Tuple[str, ReactorSignal]],
     ticker_data_5m: Dict[str, pd.DataFrame],
@@ -57,6 +60,7 @@ def simulate_high_beta_catalyst_engine(
     stop_loss_pct: float = 0.035,       # Mechanical -3.5% Stop Loss
     enable_scale_in: bool = True,       # 60/40 2-tranche scale-in on Pattern 4
     breakeven_gain_pct: float = 0.010,  # Ratchet stop to entry at +1.0% gain
+    require_7day_vol: bool = True,      # 7-day consecutive volatility screen (>=2.0% daily)
 ) -> Dict[str, Any]:
     """
     Simulates the HighBetaCatalystOpen strategy execution across all dates in date_list.
@@ -89,9 +93,22 @@ def simulate_high_beta_catalyst_engine(
         # Cache daily signals for competitor catalyst analysis
         day_sig_cache = [s for _, s in all_eligible_signals if _ == d_str]
 
-        # Iterate high-beta stocks that have signals or data
+        # Dynamic Pre-Market Universe: Filter candidates through 7-day consecutive volatility screen
+        candidate_pool = list(dict.fromkeys(HIGH_BETA_UNIVERSE + [s.ticker for s in day_sig_cache if s.ticker]))
+        if require_7day_vol:
+            daily_universe = scan_premarket_7day_volatility_universe(
+                target_date=curr_date,
+                candidate_tickers=candidate_pool,
+                ticker_data_1d=ticker_data_1d,
+                min_daily_range_pct=0.020,
+                lookback_days=7
+            )
+        else:
+            daily_universe = candidate_pool
+
+        # Iterate qualified high-beta stocks
         seen_tickers: set = set()
-        for ticker in HIGH_BETA_UNIVERSE:
+        for ticker in daily_universe:
             if ticker in seen_tickers:
                 continue
             seen_tickers.add(ticker)
@@ -352,6 +369,10 @@ def simulate_high_beta_catalyst_engine(
         "pattern_stats": pattern_stats,
         "trades": closed_trades,
     }
+
+
+# Backward compatibility alias
+simulate_high_beta_catalyst_engine = simulate_zed_strategy_engine
 
 
 def run_comparative_high_beta_backtest(period_mode: str = "2months"):

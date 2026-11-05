@@ -27,15 +27,33 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from strategies.market_reactor import fetch_reactor_signals, ReactorSignal, get_mysql_connection
-from strategies.high_beta_catalyst_open import COMPETITOR_MAP, CatalystConfluenceEngine
-from strategies.institutional_v_recovery import compute_vwap, compute_ema
+from strategies.high_beta_catalyst_open import (
+    COMPETITOR_MAP,
+    CatalystConfluenceEngine,
+    ZedStrategy,
+    HighBetaCatalystOpenStrategy,
+    check_7day_consecutive_volatility,
+    scan_premarket_7day_volatility_universe,
+)
+from strategies.institutional_v_recovery import (
+    compute_vwap,
+    compute_ema,
+    ZedInstitutionalStrategy,
+    ZedNoVwapStrategy,
+    InstitutionalVRecoveryStrategy,
+)
 from strategies.risk_management import calculate_atr
 from strategies.run_combined_news_backtest import simulate_strategy_engine
+from strategies.run_high_beta_catalyst_backtest import (
+    simulate_high_beta_catalyst_engine,
+    simulate_zed_strategy_engine,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("InstVRecoveryBacktest")
+logger = logging.getLogger("ZedStrategyBacktest")
 
-HIGH_BETA_UNIVERSE = ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR"]
+# Seed universe of tradeable high-beta assets (dynamically qualified each morning via 7-day volatility scanner)
+HIGH_BETA_UNIVERSE = ["COIN", "NVDA", "TSLA", "AMD", "PLTR", "MARA", "MSTR", "SMCI", "RBLX", "RIOT", "CLSK", "AAPL", "MSFT"]
 
 
 def simulate_institutional_v_engine(
@@ -53,10 +71,13 @@ def simulate_institutional_v_engine(
     min_rvol: float = 1.5,              # RVOL >= 1.5
     breakeven_gain_pct: float = 0.010,  # Breakeven ratchet at +1.0% gain
     max_trades_per_day: int = 2,        # Max 2 top-confluence setups per day
+    require_vwap: bool = True,          # Toggle VWAP Reclaim condition
+    require_rvol: bool = True,          # Toggle RVOL >= 1.5 condition
+    strategy_label: str = "ZedStrategy_Institutional (V2: WITH VWAP & RVOL)",
 ) -> Dict[str, Any]:
     """
     Simulates the Institutional V-Recovery strategy execution with all 5 upgrades:
-    1. Volume Profile & Intraday VWAP Confluence
+    1. Volume Profile & Intraday VWAP Confluence (Configurable)
     2. Quantitative Higher-Timeframe Nasdaq Filter + Relative Strength Divergence
     3. Structural Volatility-Based Stop-Loss (Dynamic 15m ATR, max 3.0%)
     4. Strict Execution Windows (09:35-10:15 entries, 15:55 EOD close)
@@ -90,9 +111,20 @@ def simulate_institutional_v_engine(
 
         # Collect candidate signals for current session
         day_candidates = []
+
+        # Dynamic Pre-Market Universe: Filter candidates through 7-day consecutive volatility screen
+        candidate_pool = list(dict.fromkeys(HIGH_BETA_UNIVERSE + [s.ticker for s in day_sig_cache if s.ticker]))
+        qualified_universe = scan_premarket_7day_volatility_universe(
+            target_date=curr_date,
+            candidate_tickers=candidate_pool,
+            ticker_data_1d=ticker_data_1d,
+            min_daily_range_pct=0.020,
+            lookback_days=7
+        )
+
         seen_tickers: set = set()
 
-        for ticker in HIGH_BETA_UNIVERSE:
+        for ticker in qualified_universe:
             if ticker in seen_tickers:
                 continue
             seen_tickers.add(ticker)
@@ -150,14 +182,14 @@ def simulate_institutional_v_engine(
 
                 # Strict Entry Window (09:35 - 10:15 EST)
                 if time(9, 35) <= b_time <= time(10, 15):
-                    # Enhancement 1: VWAP Reclaim
-                    vwap_reclaimed = (cur_price >= cur_vwap) or (bar_low <= cur_vwap and cur_price > cur_vwap)
+                    # Enhancement 1: VWAP Reclaim (Configurable)
+                    vwap_reclaimed = True if not require_vwap else ((cur_price >= cur_vwap) or (bar_low <= cur_vwap and cur_price > cur_vwap))
 
-                    # Enhancement 1: RVOL >= 1.5
+                    # Enhancement 1: RVOL >= 1.5 (Configurable)
                     vol_ma20 = float(day_candles["volume"].iloc[:idx+1].rolling(min(20, idx+1)).mean().iloc[-1])
                     cur_vol = float(bar["volume"])
                     rvol = (cur_vol / vol_ma20) if vol_ma20 > 0 else 1.0
-                    rvol_confirmed = (rvol >= min_rvol) or (cur_vol >= vol_ma20 * 1.3)
+                    rvol_confirmed = True if not require_rvol else ((rvol >= min_rvol) or (cur_vol >= vol_ma20 * 1.3))
 
                     # Enhancement 2: Bullish Divergence vs QQQ
                     has_bullish_div = True
@@ -185,7 +217,7 @@ def simulate_institutional_v_engine(
                         hard_sl = max(session_low - atr_buffer, cur_price * (1.0 - max_stop_pct))
                         risk_per_share = abs(cur_price - hard_sl)
                         if risk_per_share > 0:
-                            score = rvol * (1.5 if cat_bias == "BULLISH" else 1.0)
+                            score = (rvol if require_rvol else (bounce_height * 100)) * (1.5 if cat_bias == "BULLISH" else 1.0)
                             day_candidates.append({
                                 "ticker": ticker,
                                 "bar_idx": idx,
@@ -318,7 +350,7 @@ def simulate_institutional_v_engine(
     total_ret = net_pnl / initial_portfolio
 
     return {
-        "strategy": "Institutional_VRecovery (5 Upgrades)",
+        "strategy": strategy_label,
         "total_trades": tot_trades,
         "winning_trades": len(win_trades),
         "breakeven_trades": len(be_trades),
@@ -332,6 +364,10 @@ def simulate_institutional_v_engine(
         "final_portfolio": portfolio_cash,
         "trades": closed_trades,
     }
+
+
+# Backward compatibility alias
+simulate_zed_institutional_engine = simulate_institutional_v_engine
 
 
 def run_comparative_inst_v_backtest(period_mode: str = "3months"):
@@ -437,8 +473,8 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
     qqq_5m = ticker_data_5m.get("QQQ")
     initial_portfolio = 100000.0
 
-    # 1. Run Institutional V-Recovery Simulation
-    res_inst_v = simulate_institutional_v_engine(
+    # 1. Run Institutional V-Recovery Simulations (V2: WITH VWAP & RVOL vs V3: WITHOUT VWAP & RVOL)
+    res_inst_v2 = simulate_institutional_v_engine(
         date_list=date_list,
         all_eligible_signals=all_eligible,
         ticker_data_5m=ticker_data_5m,
@@ -453,7 +489,47 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
         min_rvol=1.5,
         breakeven_gain_pct=0.010,
         max_trades_per_day=2,
+        require_vwap=True,
+        require_rvol=True,
+        strategy_label="ZedStrategy_Institutional (V2: WITH VWAP & RVOL)",
     )
+
+    res_inst_v3 = simulate_institutional_v_engine(
+        date_list=date_list,
+        all_eligible_signals=all_eligible,
+        ticker_data_5m=ticker_data_5m,
+        ticker_data_1d=ticker_data_1d,
+        qqq_5m=qqq_5m,
+        qqq_1d=ticker_data_1d.get("QQQ"),
+        initial_portfolio=initial_portfolio,
+        target1_pct=0.020,
+        target2_runner_pct=0.035,
+        atr_stop_mult=1.2,
+        max_stop_pct=0.030,
+        min_rvol=1.5,
+        breakeven_gain_pct=0.010,
+        max_trades_per_day=2,
+        require_vwap=False,
+        require_rvol=False,
+        strategy_label="ZedStrategy_NoVwapFilter (V3: NO VWAP & RVOL)",
+    )
+
+    # Version 1: ZedStrategy_Base (4-Pattern Base Engine + 7D Volatility Universe)
+    res_v1 = simulate_zed_strategy_engine(
+        date_list=date_list,
+        all_eligible_signals=all_eligible,
+        ticker_data_5m=ticker_data_5m,
+        ticker_data_1d=ticker_data_1d,
+        qqq_1d=ticker_data_1d.get("QQQ"),
+        qqq_5m=qqq_5m,
+        initial_portfolio=initial_portfolio,
+        take_profit_pct=0.020,
+        stop_loss_pct=0.035,
+        enable_scale_in=True,
+        breakeven_gain_pct=0.010,
+        require_7day_vol=True,
+    )
+    res_v1["strategy"] = "ZedStrategy_Base (V1: 4-Pattern Engine)"
 
     # 2. Resample 5m to 15m for LiquiditySweep & MarketReactor
     ticker_data_15m: Dict[str, pd.DataFrame] = {}
@@ -505,17 +581,43 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
 
     summary_rows = [
         {
-            "Strategy / Benchmark": res_inst_v["strategy"],
-            "Total Trades": res_inst_v["total_trades"],
-            "Wins": res_inst_v["winning_trades"],
-            "Losses": res_inst_v["losing_trades"],
-            "Breakeven": res_inst_v["breakeven_trades"],
-            "Win Rate": f"{res_inst_v['win_rate']:.1%}",
-            "Profit Factor": f"{res_inst_v['profit_factor']:.2f}",
-            "Gross Profit": f"${res_inst_v['gross_profit']:+,.2f}",
-            "Gross Loss": f"-${res_inst_v['gross_loss']:,.2f}",
-            "Net P&L": f"${res_inst_v['net_pnl']:+,.2f}",
-            "Return %": f"{res_inst_v['return_pct']:+.2%}",
+            "Strategy / Benchmark": res_inst_v2["strategy"],
+            "Total Trades": res_inst_v2["total_trades"],
+            "Wins": res_inst_v2["winning_trades"],
+            "Losses": res_inst_v2["losing_trades"],
+            "Breakeven": res_inst_v2["breakeven_trades"],
+            "Win Rate": f"{res_inst_v2['win_rate']:.1%}",
+            "Profit Factor": f"{res_inst_v2['profit_factor']:.2f}",
+            "Gross Profit": f"${res_inst_v2['gross_profit']:+,.2f}",
+            "Gross Loss": f"-${res_inst_v2['gross_loss']:,.2f}",
+            "Net P&L": f"${res_inst_v2['net_pnl']:+,.2f}",
+            "Return %": f"{res_inst_v2['return_pct']:+.2%}",
+        },
+        {
+            "Strategy / Benchmark": res_inst_v3["strategy"],
+            "Total Trades": res_inst_v3["total_trades"],
+            "Wins": res_inst_v3["winning_trades"],
+            "Losses": res_inst_v3["losing_trades"],
+            "Breakeven": res_inst_v3["breakeven_trades"],
+            "Win Rate": f"{res_inst_v3['win_rate']:.1%}",
+            "Profit Factor": f"{res_inst_v3['profit_factor']:.2f}",
+            "Gross Profit": f"${res_inst_v3['gross_profit']:+,.2f}",
+            "Gross Loss": f"-${res_inst_v3['gross_loss']:,.2f}",
+            "Net P&L": f"${res_inst_v3['net_pnl']:+,.2f}",
+            "Return %": f"{res_inst_v3['return_pct']:+.2%}",
+        },
+        {
+            "Strategy / Benchmark": res_v1["strategy"],
+            "Total Trades": res_v1["total_trades"],
+            "Wins": res_v1.get("tp_hits", res_v1.get("winning_trades", 0)),
+            "Losses": res_v1.get("sl_hits", res_v1.get("losing_trades", 0)),
+            "Breakeven": res_v1.get("breakeven_trades", 0),
+            "Win Rate": f"{res_v1['win_rate']:.1%}",
+            "Profit Factor": f"{res_v1['profit_factor']:.2f}",
+            "Gross Profit": f"${res_v1.get('gross_profit', 0.0):+,.2f}",
+            "Gross Loss": f"-${abs(res_v1.get('gross_loss', 0.0)):,.2f}",
+            "Net P&L": f"${res_v1['net_pnl']:+,.2f}",
+            "Return %": f"{res_v1['return_pct']:+.2%}",
         },
         {
             "Strategy / Benchmark": res_swp["strategy"],
@@ -570,23 +672,26 @@ def run_comparative_inst_v_backtest(period_mode: str = "3months"):
         print("\n" + "-" * 120)
         print(" ALPHA OUTPERFORMANCE RELATIVE TO $100K BENCHMARKS:")
         print("-" * 120)
-        strat_ret = res_inst_v["return_pct"]
-        strat_pnl = res_inst_v["net_pnl"]
-        if spy_b:
-            spy_alpha = strat_ret - spy_b["return_pct"]
-            spy_diff = strat_pnl - spy_b["pnl"]
-            print(f" • vs SPY (S&P 500):   {spy_alpha:+.2%} Alpha (${spy_diff:+,.2f} dollar advantage)")
-        if qqq_b:
-            qqq_alpha = strat_ret - qqq_b["return_pct"]
-            qqq_diff = strat_pnl - qqq_b["pnl"]
-            print(f" • vs QQQ (NASDAQ):   {qqq_alpha:+.2%} Alpha (${qqq_diff:+,.2f} dollar advantage)")
+        for s_res in [res_inst_v2, res_inst_v3, res_v1]:
+            s_name = s_res["strategy"]
+            s_ret = s_res["return_pct"]
+            s_pnl = s_res["net_pnl"]
+            print(f"[{s_name}]")
+            if spy_b:
+                spy_alpha = s_ret - spy_b["return_pct"]
+                spy_diff = s_pnl - spy_b["pnl"]
+                print(f"   • vs SPY:  {spy_alpha:+.2%} Alpha (${spy_diff:+,.2f} dollar advantage)")
+            if qqq_b:
+                qqq_alpha = s_ret - qqq_b["return_pct"]
+                qqq_diff = s_pnl - qqq_b["pnl"]
+                print(f"   • vs QQQ:  {qqq_alpha:+.2%} Alpha (${qqq_diff:+,.2f} dollar advantage)")
 
     # Save CSV
     out_csv = os.path.join(BASE_DIR, "logs", f"inst_v_recovery_backtest_{date_list[0]}_to_{date_list[-1]}.csv")
     df_summary.to_csv(out_csv, index=False)
     print(f"\n[OK] Institutional summary saved to: {out_csv}")
 
-    return res_inst_v, benchmarks
+    return res_inst_v2, res_inst_v3, benchmarks
 
 
 if __name__ == "__main__":
