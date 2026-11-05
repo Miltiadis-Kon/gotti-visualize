@@ -366,8 +366,9 @@ def run_comparative_high_beta_backtest(period_mode: str = "2months"):
     # Fetch signals from MySQL
     conn = get_mysql_connection()
     cursor = conn.cursor(dictionary=True)
+    min_query_date = '2026-08-05' if period_mode in ("3months", "3month", "6months", "6month") else '2026-09-01'
     cursor.execute(
-        "SELECT DISTINCT signal_date FROM signals WHERE signal_date >= '2026-09-01' ORDER BY signal_date ASC"
+        f"SELECT DISTINCT signal_date FROM signals WHERE signal_date >= '{min_query_date}' ORDER BY signal_date ASC"
     )
     all_dates = [r["signal_date"].strftime("%Y-%m-%d") for r in cursor.fetchall()]
     conn.close()
@@ -375,19 +376,24 @@ def run_comparative_high_beta_backtest(period_mode: str = "2months"):
     if not all_dates:
         # Fallback date list
         all_dates = [
-            "2026-09-01", "2026-09-08", "2026-09-15", "2026-09-22", "2026-09-29",
-            "2026-10-06", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19",
-            "2026-10-20", "2026-10-28", "2026-10-29", "2026-11-02", "2026-11-03", "2026-11-05"
+            "2026-08-29", "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-17",
+            "2026-09-18", "2026-09-22", "2026-09-23", "2026-09-29", "2026-09-30",
+            "2026-10-01", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16",
+            "2026-10-19", "2026-10-20", "2026-10-28", "2026-10-29", "2026-11-02",
+            "2026-11-03", "2026-11-05"
         ]
 
-    if period_mode == "1month":
+    if period_mode in ("3months", "3month"):
+        date_list = [d for d in all_dates if d >= "2026-08-05"]
+        period_title = "Past 3 Months (Aug 5 - Nov 5, 2026)"
+    elif period_mode == "1month":
         date_list = [d for d in all_dates if d >= "2026-10-01"]
         period_title = "Past 1 Month (Oct 1 - Nov 5, 2026)"
     elif period_mode == "week":
         date_list = [d for d in all_dates if d >= "2026-10-28"]
         period_title = "Recent Sessions (Oct 28 - Nov 5, 2026)"
     else:  # "2months"
-        date_list = all_dates
+        date_list = [d for d in all_dates if d >= "2026-09-01"]
         period_title = "Past 2 Months (Sep 1 - Nov 5, 2026)"
 
     print(f"Evaluation Period: {period_title} ({len(date_list)} trading sessions)")
@@ -404,8 +410,7 @@ def run_comparative_high_beta_backtest(period_mode: str = "2months"):
 
     # Download 5m and 1d data for High-Beta Universe and Benchmarks
     all_download_syms = list(set(HIGH_BETA_UNIVERSE + ["SPY", "QQQ"]))
-    earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
-    start_dt = max(pd.to_datetime(date_list[0]) - timedelta(days=10), earliest_safe)
+    start_dt = pd.to_datetime(date_list[0]) - timedelta(days=7)
     end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=2)
 
     print(f"Downloading 5-minute candles from {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}...")
@@ -413,20 +418,58 @@ def run_comparative_high_beta_backtest(period_mode: str = "2months"):
     ticker_data_5m: Dict[str, pd.DataFrame] = {}
     ticker_data_1d: Dict[str, pd.DataFrame] = {}
 
+    # 1. Fetch 5m intraday bars via Alpaca IEX (supports > 60 days history)
+    try:
+        alpaca_key = os.getenv("ALPACA_API_KEY")
+        alpaca_sec = os.getenv("ALPACA_API_SECRET")
+        if alpaca_key and alpaca_sec:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockBarsRequest
+            from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+            from alpaca.data.enums import DataFeed
+
+            alp_client = StockHistoricalDataClient(alpaca_key, alpaca_sec)
+            tf5 = TimeFrame(5, TimeFrameUnit.Minute)
+            req = StockBarsRequest(
+                symbol_or_symbols=all_download_syms,
+                timeframe=tf5,
+                start=start_dt,
+                end=end_dt,
+                feed=DataFeed.IEX
+            )
+            bars_alp = alp_client.get_stock_bars(req)
+            if bars_alp and hasattr(bars_alp, "df") and not bars_alp.df.empty:
+                df_alp = bars_alp.df
+                for sym in all_download_syms:
+                    if sym in df_alp.index.levels[0]:
+                        sub = df_alp.xs(sym).copy()
+                        sub.columns = [c.lower() for c in sub.columns]
+                        if sub.index.tz is not None:
+                            sub.index = sub.index.tz_convert("America/New_York")
+                        else:
+                            sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
+                        ticker_data_5m[sym] = sub
+                print(f"Alpaca successfully fetched 5m bars for {len(ticker_data_5m)} symbols.")
+    except Exception as e:
+        print(f"Alpaca 5m fetch notice: {e}")
+
+    # 2. Fallback to YFinance for any missing symbols or 1d bars
     for sym in all_download_syms:
         try:
-            # 5m bars
-            df_5m = yf.download(sym, start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="5m", progress=False)
-            if not df_5m.empty:
-                if isinstance(df_5m.columns, pd.MultiIndex):
-                    df_5m.columns = [c[0].lower() for c in df_5m.columns]
-                else:
-                    df_5m.columns = [c.lower() for c in df_5m.columns]
-                if df_5m.index.tz is not None:
-                    df_5m.index = df_5m.index.tz_convert("America/New_York")
-                else:
-                    df_5m.index = df_5m.index.tz_localize("UTC").tz_convert("America/New_York")
-                ticker_data_5m[sym] = df_5m
+            if sym not in ticker_data_5m or ticker_data_5m[sym].empty:
+                earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
+                yf_start = max(start_dt, earliest_safe)
+                df_5m = yf.download(sym, start=yf_start.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="5m", progress=False)
+                if not df_5m.empty:
+                    if isinstance(df_5m.columns, pd.MultiIndex):
+                        df_5m.columns = [c[0].lower() for c in df_5m.columns]
+                    else:
+                        df_5m.columns = [c.lower() for c in df_5m.columns]
+                    if df_5m.index.tz is not None:
+                        df_5m.index = df_5m.index.tz_convert("America/New_York")
+                    else:
+                        df_5m.index = df_5m.index.tz_localize("UTC").tz_convert("America/New_York")
+                    ticker_data_5m[sym] = df_5m
 
             # 1d bars (for daily ATR and PDC)
             df_1d = yf.download(sym, start="2026-05-01", end=end_dt.strftime("%Y-%m-%d"), interval="1d", progress=False)
@@ -437,7 +480,7 @@ def run_comparative_high_beta_backtest(period_mode: str = "2months"):
                     df_1d.columns = [c.lower() for c in df_1d.columns]
                 ticker_data_1d[sym] = df_1d
         except Exception as e:
-            print(f"Notice fetching {sym}: {e}")
+            print(f"Notice fetching {sym} via YF: {e}")
 
     qqq_1d = ticker_data_1d.get("QQQ")
     qqq_5m = ticker_data_5m.get("QQQ")

@@ -674,6 +674,16 @@ def simulate_strategy_engine(
 
 def run_comparative_backtest(period_mode: str = "6months"):
     periods = []
+    if period_mode in ("3months", "3month"):
+        three_month_dates = [
+            "2026-08-29", "2026-09-11", "2026-09-14", "2026-09-15",
+            "2026-09-17", "2026-09-18", "2026-09-20", "2026-09-22",
+            "2026-09-23", "2026-09-29", "2026-09-30", "2026-10-01",
+            "2026-10-03", "2026-10-13", "2026-10-14", "2026-10-15",
+            "2026-10-16", "2026-10-19", "2026-10-20", "2026-10-28",
+            "2026-10-29", "2026-11-02", "2026-11-03", "2026-11-05"
+        ]
+        periods.append(("Full 3-Month Period (Aug 29 - Nov 5, 2026)", three_month_dates, 10))
     if period_mode in ("6months", "6month", "all"):
         six_month_dates = [
             "2026-08-29", "2026-09-11", "2026-09-14", "2026-09-15",
@@ -733,52 +743,80 @@ def run_comparative_backtest(period_mode: str = "6months"):
         # Batch download market data (extends 5 trading days after date_list[-1] for multi-day runners)
         # Yahoo Finance limits 15m intraday data to the last 60 calendar days
         all_syms = list(unique_tickers) + ["SPY", "QQQ"]
-        earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
-        start_dt = max(pd.to_datetime(date_list[0]) - timedelta(days=10), earliest_safe)
+        start_dt = pd.to_datetime(date_list[0]) - timedelta(days=7)
         end_dt = pd.to_datetime(date_list[-1]) + timedelta(days=5)
         print(f"Downloading market data for {len(all_syms)} tickers (including SPY & QQQ benchmarks)...")
 
         ticker_data_map: Dict[str, pd.DataFrame] = {}
-        try:
-            raw_batch = yf.download(
-                all_syms,
-                start=start_dt.strftime("%Y-%m-%d"),
-                end=end_dt.strftime("%Y-%m-%d"),
-                interval="15m",
-                group_by="ticker",
-                progress=False
-            )
-            for ticker in all_syms:
-                if len(all_syms) == 1:
-                    sub = raw_batch.copy()
-                elif hasattr(raw_batch.columns, "levels") and ticker in raw_batch.columns.levels[0]:
-                    sub = raw_batch[ticker].dropna(how="all").copy()
-                elif ticker in raw_batch:
-                    sub = raw_batch[ticker].dropna(how="all").copy()
-                else:
-                    continue
 
-                if not sub.empty:
-                    sub.columns = [c.lower() for c in sub.columns]
-                    if sub.index.tz is not None:
-                        sub.index = sub.index.tz_convert("America/New_York")
-                    else:
-                        sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
-                    ticker_data_map[ticker] = sub
+        # 1. Fetch 15m intraday bars via Alpaca IEX (supports > 60 days history)
+        try:
+            alpaca_key = os.getenv("ALPACA_API_KEY")
+            alpaca_sec = os.getenv("ALPACA_API_SECRET")
+            if alpaca_key and alpaca_sec:
+                from alpaca.data.historical import StockHistoricalDataClient
+                from alpaca.data.requests import StockBarsRequest
+                from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+                from alpaca.data.enums import DataFeed
+
+                alp_client = StockHistoricalDataClient(alpaca_key, alpaca_sec)
+                tf15 = TimeFrame(15, TimeFrameUnit.Minute)
+                req = StockBarsRequest(
+                    symbol_or_symbols=all_syms,
+                    timeframe=tf15,
+                    start=start_dt,
+                    end=end_dt,
+                    feed=DataFeed.IEX
+                )
+                bars_alp = alp_client.get_stock_bars(req)
+                if bars_alp and hasattr(bars_alp, "df") and not bars_alp.df.empty:
+                    df_alp = bars_alp.df
+                    for sym in all_syms:
+                        if sym in df_alp.index.levels[0]:
+                            sub = df_alp.xs(sym).copy()
+                            sub.columns = [c.lower() for c in sub.columns]
+                            if sub.index.tz is not None:
+                                sub.index = sub.index.tz_convert("America/New_York")
+                            else:
+                                sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
+                            ticker_data_map[sym] = sub
+                    print(f"Alpaca successfully fetched 15m bars for {len(ticker_data_map)}/{len(all_syms)} tickers.")
         except Exception as e:
-            print(f"Batch download warning: {e}. Falling back to sequential download.")
-            for ticker in all_syms:
-                try:
-                    df = yf.download(ticker, start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="15m", progress=False)
-                    if not df.empty:
-                        df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
-                        if df.index.tz is not None:
-                            df.index = df.index.tz_convert("America/New_York")
+            print(f"Alpaca 15m fetch notice: {e}")
+
+        # 2. Fallback to YFinance for any missing tickers
+        missing_syms = [s for s in all_syms if s not in ticker_data_map]
+        if missing_syms:
+            earliest_safe = pd.Timestamp.now().tz_localize(None) - timedelta(days=58)
+            yf_start = max(start_dt, earliest_safe)
+            try:
+                raw_batch = yf.download(
+                    missing_syms,
+                    start=yf_start.strftime("%Y-%m-%d"),
+                    end=end_dt.strftime("%Y-%m-%d"),
+                    interval="15m",
+                    group_by="ticker",
+                    progress=False
+                )
+                for ticker in missing_syms:
+                    if len(missing_syms) == 1:
+                        sub = raw_batch.copy()
+                    elif hasattr(raw_batch.columns, "levels") and ticker in raw_batch.columns.levels[0]:
+                        sub = raw_batch[ticker].dropna(how="all").copy()
+                    elif ticker in raw_batch:
+                        sub = raw_batch[ticker].dropna(how="all").copy()
+                    else:
+                        continue
+
+                    if not sub.empty:
+                        sub.columns = [c.lower() for c in sub.columns]
+                        if sub.index.tz is not None:
+                            sub.index = sub.index.tz_convert("America/New_York")
                         else:
-                            df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
-                        ticker_data_map[ticker] = df
-                except Exception:
-                    pass
+                            sub.index = sub.index.tz_localize("UTC").tz_convert("America/New_York")
+                        ticker_data_map[ticker] = sub
+            except Exception as e:
+                print(f"YFinance fallback notice: {e}")
 
         print(f"Data ready for {len(ticker_data_map)} assets. Extracting full continuous trading schedule...")
 
