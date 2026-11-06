@@ -1028,15 +1028,42 @@ class LiveNewsTraderService:
             return
 
         portfolio_to_risk = self.portfolio_value or self.initial_portfolio
-        qty = floor((portfolio_to_risk * risk_pct) / risk_per_share)
-        qty = max(1, min(qty, floor((portfolio_to_risk * 0.95) / entry_price)))
+
+        # Strict 5% portfolio allocation cap per trade (prevents going all in)
+        MAX_TRADE_ALLOCATION_PCT = 0.05
+        max_trade_notional = portfolio_to_risk * MAX_TRADE_ALLOCATION_PCT
+        max_qty_from_capital = floor(max_trade_notional / max(0.01, entry_price))
+
+        # Risk-based lot sizing (1.0% to 2.5% risk budget)
+        qty_from_risk = floor((portfolio_to_risk * risk_pct) / risk_per_share)
+
+        # Strictly cap quantity so position never exceeds 5% of portfolio value
+        qty = min(qty_from_risk, max_qty_from_capital)
+
+        # Ensure at least 1 share if affordable
+        if qty < 1 and entry_price <= max_trade_notional * 1.10:
+            qty = 1
+
+        # Check broker buying power buffer
+        if hasattr(self, "buying_power") and self.buying_power > 0:
+            max_bp_qty = floor((self.buying_power * 0.90) / max(0.01, entry_price))
+            qty = min(qty, max_bp_qty)
+
+        if qty <= 0:
+            logger.warning(
+                f"[{ticker}] Calculated quantity is 0 shares (5% Cap=${max_trade_notional:,.2f} | "
+                f"Entry=${entry_price:.2f}). Skipping order execution."
+            )
+            return
 
         total_amount = round(qty * entry_price, 2)
         pos_id = f"{strategy_name}_{ticker}_{datetime.now().strftime('%H%M%S')}"
 
+        actual_alloc_pct = (total_amount / portfolio_to_risk) if portfolio_to_risk > 0 else 0.0
         logger.info(
             f"🚀 [ORDER TRIGGER] {strategy_name} | {ticker} {side} {qty} shares @ ${entry_price:.2f} | "
-            f"SL=${stop_loss:.2f} | TP=${take_profit:.2f} | Risk=${portfolio_to_risk * risk_pct:.2f} ({risk_pct:.2%}) | {reason}"
+            f"Notional=${total_amount:,.2f} ({actual_alloc_pct:.2%} of portfolio, <=5% cap) | "
+            f"SL=${stop_loss:.2f} | TP=${take_profit:.2f} | Risk=${risk_per_share * qty:,.2f} | {reason}"
         )
 
         alpaca_order_id = None

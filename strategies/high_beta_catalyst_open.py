@@ -615,9 +615,9 @@ class ZedStrategy(StrategyBaseplate):
         if risk_per_share <= 0:
             return
 
-        # Sizing based on 2% risk budget
+        # Sizing based on 2% risk budget with strict 5% portfolio allocation cap
         total_qty = floor((portfolio * 0.02) / risk_per_share)
-        total_qty = max(2, min(total_qty, floor((portfolio * 0.95) / price)))
+        total_qty = max(2, min(total_qty, floor((portfolio * 0.05) / price)))
 
         if self.enable_scale_in and pattern == "PATTERN_4_FORENSIC_COIN_V_RECOVERY_BULL_FLAG":
             # 2 Tranches: e.g. 60% lot 1 (220 shs) + 40% lot 2 (130 shs)

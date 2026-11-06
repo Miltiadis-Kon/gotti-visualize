@@ -606,7 +606,7 @@ class BaseKeyLevelsStrategy(StrategyBaseplate):
         if risk_per_share <= 0:
             return 0
         quantity = floor(risk_budget / risk_per_share)
-        max_affordable = floor((self.get_portfolio_value() * 0.95) / max(0.01, entry_price))
+        max_affordable = floor((self.get_portfolio_value() * 0.05) / max(0.01, entry_price))
         quantity = min(quantity, max_affordable)
         return max(0, quantity)
 

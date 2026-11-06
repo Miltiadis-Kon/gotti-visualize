@@ -626,7 +626,7 @@ class MarketReactorStrategy(StrategyBaseplate):
             return 0
 
         qty = floor(risk_budget / risk_per_share)
-        max_affordable = floor((portfolio_val * 0.95) / max(0.01, entry_price))
+        max_affordable = floor((portfolio_val * 0.05) / max(0.01, entry_price))
         return max(0, min(qty, max_affordable))
 
     # ─────────────────────────────────────────────────────────────────────────

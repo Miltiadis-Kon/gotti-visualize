@@ -189,7 +189,7 @@ def run_multi_day_backtest(
             risk_budget = initial_portfolio * risk_pct
             risk_per_share = abs(entry_price - sl_price)
             qty = floor(risk_budget / max(0.01, risk_per_share))
-            max_shares = floor((initial_portfolio * 0.95) / entry_price)
+            max_shares = floor((initial_portfolio * 0.05) / entry_price)
             quantity = max(1, min(qty, max_shares))
 
             active_positions[ticker] = {

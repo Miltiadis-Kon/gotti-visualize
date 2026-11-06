@@ -321,9 +321,9 @@ class ZedInstitutionalStrategy(StrategyBaseplate):
         if risk_per_share <= 0:
             return
 
-        # 2% Risk Budget
+        # 2% Risk Budget with strict 5% portfolio allocation cap
         total_qty = floor((portfolio * 0.02) / risk_per_share)
-        total_qty = max(2, min(total_qty, floor((portfolio * 0.90) / price)))
+        total_qty = max(2, min(total_qty, floor((portfolio * 0.05) / price)))
 
         self.active_position_side = "BUY"
         self.entry_price = price

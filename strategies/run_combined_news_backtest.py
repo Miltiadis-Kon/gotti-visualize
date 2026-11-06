@@ -203,7 +203,7 @@ def simulate_strategy_engine(
                         risk_per_share = abs(p - sl_price)
 
                         qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / p)))
+                        qty = max(1, min(qty, floor((initial_portfolio * 0.05) / p)))
 
                         active_positions[ticker] = {
                             "ticker": ticker,
@@ -418,7 +418,7 @@ def simulate_strategy_engine(
                     e_side, e_p, e_sl, e_tp, e_peak, e_reason = entry_setup
                     risk_per_share = abs(e_p - e_sl)
                     qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                    qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
+                    qty = max(1, min(qty, floor((initial_portfolio * 0.05) / e_p)))
 
                     active_positions[ticker] = {
                         "ticker": ticker, "position": e_side, "entry_date": d_str,
@@ -502,7 +502,7 @@ def simulate_strategy_engine(
                         e_side, e_p, e_sl, e_tp, e_reason = sweep_trigger
                         risk_per_share = abs(e_p - e_sl)
                         qty = floor((initial_portfolio * eff_risk) / max(0.01, risk_per_share))
-                        qty = max(1, min(qty, floor((initial_portfolio * 0.95) / e_p)))
+                        qty = max(1, min(qty, floor((initial_portfolio * 0.05) / e_p)))
 
                         active_positions[ticker] = {
                             "ticker": ticker, "position": e_side, "entry_date": d_str,

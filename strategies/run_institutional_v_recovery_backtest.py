@@ -246,7 +246,7 @@ def simulate_institutional_v_engine(
 
             risk_per_share = abs(entry_price - hard_sl)
             qty = floor((portfolio_cash * 0.02) / risk_per_share)
-            qty = max(2, min(qty, floor((portfolio_cash * 0.90) / entry_price)))
+            qty = max(2, min(qty, floor((portfolio_cash * 0.05) / entry_price)))
 
             total_shares = qty
             remaining_shares = qty

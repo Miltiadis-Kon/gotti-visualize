@@ -237,7 +237,7 @@ def simulate_zed_strategy_engine(
                         risk_per_share = abs(cur_price - setup_sl)
                         if risk_per_share > 0:
                             total_qty = floor((portfolio_cash * 0.02) / risk_per_share)
-                            total_qty = max(2, min(total_qty, floor((portfolio_cash * 0.90) / cur_price)))
+                            total_qty = max(2, min(total_qty, floor((portfolio_cash * 0.05) / cur_price)))
 
                             if enable_scale_in and trigger_pattern == "PATTERN_4_FORENSIC_COIN_BULL_FLAG":
                                 tranche1_shares = floor(total_qty * 0.60)

@@ -547,7 +547,7 @@ class NewsLiquiditySweepStrategy(StrategyBaseplate):
 
         effective_risk_per_share = max(abs(current_price - final_sl), 0.8 * atr_15m, current_price * 0.008)
         qty = floor(risk_budget / effective_risk_per_share)
-        max_shares = floor((portfolio_val * 0.50) / current_price)
+        max_shares = floor((portfolio_val * 0.05) / current_price)
         quantity = max(0, min(qty, max_shares))
 
         if quantity <= 0:
