@@ -26,6 +26,7 @@ import argparse
 from math import floor, sqrt
 from datetime import datetime, date, time as dtime, timedelta
 from typing import Dict, List, Optional, Any, Set, Tuple
+from dataclasses import asdict
 
 import pandas as pd
 import numpy as np
@@ -92,10 +93,65 @@ logging.basicConfig(
 logger = logging.getLogger("LiveNewsTrader")
 
 
+
+class EtfAccountContext:
+    """
+    Represents an isolated Alpaca Paper/Live Account tied strictly to a specific ETF tier.
+    Enforces strict risk sizing, portfolio isolation, and trade routing:
+    - Level 3 (Diamond Hands ETF): ZedStrategy (V2) & News_LiquiditySweep ONLY (max 5% cap)
+    - Level 2 (Steady Grind ETF): MarketOpen_Catalyst & MarketReactor_Fade ONLY (max 5% cap)
+    - Level 1 (Boomer Haven ETF): Automated Daily 1% Index DCA (QQQ + SPY)
+    """
+    def __init__(
+        self,
+        level: int,
+        name: str,
+        sub_account_id: str,
+        api_key: str,
+        api_secret: str,
+        paper: bool = True,
+        initial_portfolio: float = 1000000.0,
+        max_trade_pct: float = 0.05,
+    ):
+        self.level = level
+        self.name = name
+        self.sub_account_id = sub_account_id
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.paper = paper
+        self.max_trade_pct = max_trade_pct
+        self.account_id: Optional[str] = None
+        self.portfolio_value: float = initial_portfolio
+        self.buying_power: float = initial_portfolio
+        self.cash: float = initial_portfolio
+        self.trading_client: Optional[TradingClient] = None
+        self.broker: Optional[Alpaca] = None
+        self.active_positions: Dict[str, Dict[str, Any]] = {}
+
+        if api_key and api_secret:
+            try:
+                self.trading_client = TradingClient(api_key, api_secret, paper=paper)
+                acct = self.trading_client.get_account()
+                self.account_id = str(acct.id)
+                self.portfolio_value = float(acct.portfolio_value or initial_portfolio)
+                self.buying_power = float(acct.buying_power or initial_portfolio)
+                self.cash = float(acct.cash or initial_portfolio)
+                config = {"API_KEY": api_key, "API_SECRET": api_secret, "PAPER": paper}
+                self.broker = Alpaca(config)
+                logger.info(
+                    f"[Alpaca ETF Connected] Level {self.level}: {self.name} | "
+                    f"Account: {self.account_id} | Portfolio: ${self.portfolio_value:,.2f} | "
+                    f"Cash: ${self.cash:,.2f} | BP: ${self.buying_power:,.2f}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to connect Alpaca for Level {self.level} ({self.name}): {e}")
+
 class LiveNewsTraderService:
     """
-    Continuous live trading service managing News_LiquiditySweep and
-    MarketReactor (Fade Mode) strategies using Lumibot and Alpaca.
+    Continuous live trading service managing segregated multi-tier ETF accounts:
+    1. Level 3 (Diamond Hands ETF): ZedStrategy (V2) & News_LiquiditySweep ONLY (5% cap).
+    2. Level 2 (Steady Grind ETF): MarketOpen_Catalyst & MarketReactor_Fade ONLY (5% cap).
+    3. Level 1 (Boomer Haven ETF): Daily Index DCA (1% QQQ + 1% SPY daily).
     """
 
     def __init__(
@@ -114,13 +170,19 @@ class LiveNewsTraderService:
             "MarketReactor_Fade",
             "ZedStrategy_Institutional",
             "MarketOpen_Catalyst",
+            "Index_DCA",
         ]
         self.initial_portfolio = initial_portfolio
 
         self.tz_est = pytz.timezone("America/New_York")
         self.running = True
 
-        # Broker connection & clients
+        # Multi-Tier ETF Account contexts
+        self.etf_accounts: Dict[int, EtfAccountContext] = {}
+        self.l1_dca_executed_date: Optional[date] = None
+        self.last_subaccount_sync_time: float = 0.0
+
+        # Legacy pointers mapped to L3 for backward compatibility
         self.broker: Optional[Alpaca] = None
         self.trading_client: Optional[TradingClient] = None
         self.data_client: Optional[StockHistoricalDataClient] = None
@@ -148,7 +210,6 @@ class LiveNewsTraderService:
         self._init_broker()
 
         # Real-time event-driven signal observer (<5ms WebSocket + sub-second DB change detection)
-        # We pass on_signal_callback=None so signals are queued and processed sequentially in the main loop
         self.observer = RealTimeSignalObserver(
             on_signal_callback=None,
             db_poll_interval_sec=1.0,
@@ -156,7 +217,7 @@ class LiveNewsTraderService:
 
     def _on_instant_signal_observed(self, sig: ReactorSignal):
         """Processes instant live signal (< 5ms via WS or < 1s via DB) sequentially."""
-        logger.info(f"⚡ [OBSERVER EVENT] Processing instant live signal: {sig.ticker} {sig.signal_position}")
+        logger.info(f"[OBSERVER EVENT] Processing instant live signal: {sig.ticker} {sig.signal_position}")
         self._process_single_signal(sig, is_historical=False)
 
     def _setup_signal_handlers(self):
@@ -171,54 +232,75 @@ class LiveNewsTraderService:
             pass
 
     def _init_broker(self):
-        """Initializes connection to Alpaca via Lumibot."""
+        """Initializes isolated Alpaca connections for all three ETF account tiers."""
         if self.dry_run:
             logger.info("Service started in DRY-RUN mode. Orders will be simulated and logged.")
             return
 
-        api_key = (
-            os.getenv("ALPACA_KEY_LVL3")
-            or os.getenv("ALPACA_API_KEY")
-            or os.getenv("APCA_API_KEY_PAPER")
-            or os.getenv("ALPACA_KEY_LVL1")
+        # 1. Level 1: Boomer Haven ETF (Account ID: f18df431-7573-4d6a-a5f7-362ee95c81c4)
+        k1 = os.getenv("ALPACA_KEY_LVL1")
+        s1 = os.getenv("ALPACA_SECRET_LVL1")
+        ctx_l1 = EtfAccountContext(
+            level=1,
+            name="Level 1: Boomer Haven ETF",
+            sub_account_id="sub-defensive-01",
+            api_key=k1 or "",
+            api_secret=s1 or "",
+            paper=self.paper,
+            initial_portfolio=1000000.0,
+            max_trade_pct=0.01,
         )
-        api_secret = (
-            os.getenv("ALPACA_SECRET_LVL3")
-            or os.getenv("ALPACA_API_SECRET")
-            or os.getenv("APCA_API_SECRET_KEY_PAPER")
-            or os.getenv("ALPACA_SECRET_LVL1")
+        self.etf_accounts[1] = ctx_l1
+
+        # 2. Level 2: Steady Grind ETF (Account ID: bc4ca0cd-ff0e-42f1-a550-16e1000d87fe)
+        k2 = os.getenv("ALPACA_KEY_LVL2")
+        s2 = os.getenv("ALPACA_SECRET_LVL2")
+        ctx_l2 = EtfAccountContext(
+            level=2,
+            name="Level 2: Steady Grind ETF",
+            sub_account_id="sub-main-02",
+            api_key=k2 or "",
+            api_secret=s2 or "",
+            paper=self.paper,
+            initial_portfolio=101251.95,
+            max_trade_pct=0.05,
         )
+        self.etf_accounts[2] = ctx_l2
 
-        if not api_key or not api_secret:
-            logger.warning("No Alpaca API credentials found in environment. Defaulting to DRY-RUN mode.")
-            self.dry_run = True
-            return
+        # 3. Level 3: Diamond Hands ETF (Account ID: 4452438e-eb6c-4f44-b7ca-34da00aa780d)
+        k3 = os.getenv("ALPACA_KEY_LVL3") or os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_PAPER")
+        s3 = os.getenv("ALPACA_SECRET_LVL3") or os.getenv("ALPACA_API_SECRET") or os.getenv("APCA_API_SECRET_KEY_PAPER")
+        ctx_l3 = EtfAccountContext(
+            level=3,
+            name="Level 3: Diamond Hands ETF",
+            sub_account_id="sub-alpha-03",
+            api_key=k3 or "",
+            api_secret=s3 or "",
+            paper=self.paper,
+            initial_portfolio=1000000.0,
+            max_trade_pct=0.05,
+        )
+        self.etf_accounts[3] = ctx_l3
 
-        config = {
-            "API_KEY": api_key,
-            "API_SECRET": api_secret,
-            "PAPER": self.paper,
-        }
+        # Default legacy pointers mapped to Level 3 for compatibility
+        self.trading_client = ctx_l3.trading_client
+        self.broker = ctx_l3.broker
+        self.account_id = ctx_l3.account_id
+        self.portfolio_value = ctx_l3.portfolio_value
+        self.buying_power = ctx_l3.buying_power
 
-        try:
-            self.trading_client = TradingClient(api_key, api_secret, paper=self.paper)
-            self.data_client = StockHistoricalDataClient(api_key, api_secret)
-            self.broker = Alpaca(config)
-            acct = self.trading_client.get_account()
-            self.account_id = str(acct.id)
-            self.portfolio_value = float(acct.portfolio_value or self.initial_portfolio)
-            self.buying_power = float(acct.buying_power or self.initial_portfolio)
-            mode_str = "PAPER" if self.paper else "LIVE"
-            etf_name = os.getenv("ETF_NAME", "Level 3: Diamond Hands ETF")
-            logger.info(
-                f"[Alpaca Connected] Strategy Engine: {etf_name} | Mode: {mode_str} | "
-                f"Account: {self.account_id} | Portfolio: ${self.portfolio_value:,.2f} | "
-                f"Buying Power: ${self.buying_power:,.2f}"
-            )
-            self._sync_active_positions_from_broker()
-        except Exception as e:
-            logger.error(f"Failed to connect to Alpaca API: {e}. Falling back to DRY-RUN mode.")
-            self.dry_run = True
+        # Shared market data client (SIP feed quotes/bars)
+        data_key = k3 or k1 or k2
+        data_secret = s3 or s1 or s2
+        if data_key and data_secret:
+            try:
+                self.data_client = StockHistoricalDataClient(data_key, data_secret)
+                logger.info("[Alpaca Market Data] StockHistoricalDataClient initialized successfully.")
+            except Exception as e:
+                logger.error(f"Failed to initialize Alpaca Market Data client: {e}")
+
+        self._sync_active_positions_from_broker()
+        self._sync_sub_accounts_database()
 
     def _notify_telegram(self, text: str):
         """Sends rich formatted alert to the dedicated Telegram Trades Bot (@gotti_trades_bot)."""
@@ -237,12 +319,18 @@ class LiveNewsTraderService:
             logger.debug(f"Telegram notification error: {e}")
 
     def _load_persisted_state(self):
-        """Loads processed signal IDs and active positions from disk if available."""
+        """Loads processed signal IDs, premarket queue, and active positions from disk if available."""
         if os.path.exists(STATE_FILE):
             try:
                 with open(STATE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.processed_signal_ids = set(data.get("processed_signal_ids", []))
+                    if data.get("l1_dca_executed_date"):
+                        try:
+                            self.l1_dca_executed_date = date.fromisoformat(data["l1_dca_executed_date"])
+                        except Exception:
+                            pass
+
                     raw_positions = data.get("active_positions", {})
                     for pid, pos in raw_positions.items():
                         if "entry_time" in pos and isinstance(pos["entry_time"], str):
@@ -251,26 +339,48 @@ class LiveNewsTraderService:
                             parts = [int(x) for x in pos["eod_flatten_time"].split(":")]
                             pos["eod_flatten_time"] = dtime(*parts)
                         self.active_positions[pid] = pos
-                    logger.info(f"Loaded {len(self.processed_signal_ids)} processed signal IDs and {len(self.active_positions)} active positions from state file.")
+
+                    raw_premarket = data.get("premarket_catalyst_queue", {})
+                    for tk, sig_dict in raw_premarket.items():
+                        try:
+                            self.premarket_catalyst_queue[tk] = ReactorSignal(**sig_dict)
+                        except Exception:
+                            pass
+
+                    logger.info(
+                        f"Loaded state: {len(self.processed_signal_ids)} signals, "
+                        f"{len(self.active_positions)} active positions, "
+                        f"{len(self.premarket_catalyst_queue)} queued premarket catalysts."
+                    )
             except Exception as e:
                 logger.warning(f"Could not load state file: {e}")
 
     def _persist_state(self):
-        """Saves processed signals, active positions, and state to disk."""
+        """Saves processed signal IDs, premarket queue, and active positions to disk."""
         try:
             serializable_positions = {}
-            for pid, pos in self.active_positions.items():
-                p_copy = dict(pos)
-                if "entry_time" in p_copy and isinstance(p_copy["entry_time"], datetime):
-                    p_copy["entry_time"] = p_copy["entry_time"].isoformat()
-                if "eod_flatten_time" in p_copy and isinstance(p_copy["eod_flatten_time"], dtime):
-                    p_copy["eod_flatten_time"] = p_copy["eod_flatten_time"].strftime("%H:%M:%S")
-                serializable_positions[pid] = p_copy
+            for pid, p in self.active_positions.items():
+                cp = p.copy()
+                if isinstance(cp.get("entry_time"), (datetime, date)):
+                    cp["entry_time"] = cp["entry_time"].isoformat()
+                if isinstance(cp.get("eod_flatten_time"), dtime):
+                    cp["eod_flatten_time"] = cp["eod_flatten_time"].strftime("%H:%M:%S")
+                serializable_positions[pid] = cp
+
+            serializable_premarket = {}
+            for tk, sig in self.premarket_catalyst_queue.items():
+                if hasattr(sig, "__dict__"):
+                    serializable_premarket[tk] = {
+                        k: v for k, v in sig.__dict__.items()
+                        if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+                    }
 
             data = {
                 "last_saved": datetime.now(self.tz_est).isoformat(),
+                "l1_dca_executed_date": self.l1_dca_executed_date.isoformat() if self.l1_dca_executed_date else None,
                 "processed_signal_ids": list(self.processed_signal_ids),
                 "active_positions": serializable_positions,
+                "premarket_catalyst_queue": serializable_premarket,
                 "active_positions_count": len(self.active_positions),
                 "daily_trades_count": len(self.daily_completed_trades),
             }
@@ -281,96 +391,137 @@ class LiveNewsTraderService:
 
     def _sync_active_positions_from_broker(self):
         """
-        Synchronizes open positions on Alpaca with in-memory state and MySQL on startup.
-        Ensures restart-safety and continuous EOD flatten & stop management.
+        Synchronizes open positions on each Alpaca ETF account with in-memory state and MySQL on startup.
+        Ensures restart-safety and continuous EOD flatten & stop management across all 3 tiers.
         """
-        if not self.trading_client or self.dry_run:
+        if self.dry_run:
             return
 
-        try:
-            alpaca_positions = self.trading_client.get_all_positions()
-            if not alpaca_positions:
-                logger.info("[Broker Sync] No active open positions on Alpaca.")
-                return
+        for lvl, etf_ctx in self.etf_accounts.items():
+            if not etf_ctx.trading_client:
+                continue
 
-            logger.info(f"[Broker Sync] Reconciling {len(alpaca_positions)} open positions from Alpaca...")
-
-            open_orders_map = {}
             try:
-                conn = get_mysql_connection()
-                cur = conn.cursor(dictionary=True)
-                cur.execute("SELECT * FROM orders WHERE status = 'Open' ORDER BY id DESC")
-                for r in cur.fetchall():
-                    sym = r["symbol"].upper()
-                    if sym not in open_orders_map:
-                        open_orders_map[sym] = r
-                cur.close()
-                conn.close()
+                alpaca_positions = etf_ctx.trading_client.get_all_positions()
+                if not alpaca_positions:
+                    logger.info(f"[Broker Sync L{lvl}] No active open positions on Alpaca {etf_ctx.name}.")
+                    continue
+
+                logger.info(f"[Broker Sync L{lvl}] Reconciling {len(alpaca_positions)} open positions from {etf_ctx.name}...")
+
+                open_orders_map = {}
+                try:
+                    conn = get_mysql_connection()
+                    cur = conn.cursor(dictionary=True)
+                    cur.execute("SELECT * FROM orders WHERE status = 'Open' AND etf_level = %s ORDER BY id DESC", (lvl,))
+                    for r in cur.fetchall():
+                        sym = r["symbol"].upper()
+                        if sym not in open_orders_map:
+                            open_orders_map[sym] = r
+                    cur.close()
+                    conn.close()
+                except Exception as e:
+                    logger.warning(f"[Broker Sync L{lvl}] Could not query MySQL open orders: {e}")
+
+                for p in alpaca_positions:
+                    ticker = p.symbol
+                    qty = abs(int(float(p.qty)))
+                    side = "BUY" if float(p.qty) > 0 else "SELL"
+                    entry_p = float(p.avg_entry_price)
+
+                    db_record = open_orders_map.get(ticker)
+                    db_id = db_record["id"] if db_record else None
+                    strat_name = (
+                        db_record["name"].replace(f"[L{lvl}] ", "").replace(" Live", "")
+                        if db_record and db_record.get("name")
+                        else ("MarketOpen_Catalyst" if lvl == 2 else ("Index_DCA" if lvl == 1 else "ZedStrategy"))
+                    )
+
+                    if side == "BUY":
+                        sl = round(entry_p * 0.970, 2)
+                        tp = round(entry_p * 1.035, 2)
+                    else:
+                        sl = round(entry_p * 1.030, 2)
+                        tp = round(entry_p * 0.965, 2)
+
+                    pos_id = f"L{lvl}_{strat_name}_{ticker}_SYNC"
+                    if not any(pos.get("ticker") == ticker and pos.get("etf_level") == lvl for pos in self.active_positions.values()):
+                        record = {
+                            "pos_id": pos_id,
+                            "alpaca_order_id": None,
+                            "strategy": strat_name,
+                            "ticker": ticker,
+                            "side": side,
+                            "entry_price": entry_p,
+                            "quantity": qty,
+                            "stop_loss": sl,
+                            "take_profit": tp,
+                            "initial_risk": abs(entry_p - sl),
+                            "be_trigger_r": 1.2,
+                            "breakeven_ratchet": False,
+                            "eod_flatten_time": dtime(15, 55),
+                            "entry_time": datetime.now(self.tz_est),
+                            "status": "OPEN",
+                            "etf_level": lvl,
+                            "db_order_id": db_id,
+                        }
+                        self.active_positions[pos_id] = record
+                        etf_ctx.active_positions[pos_id] = record
+                        logger.info(f"[Broker Sync L{lvl}] Reconciled active position: {ticker} ({side} {qty} @ ${entry_p:.2f})")
             except Exception as e:
-                logger.warning(f"[Broker Sync] Could not query MySQL open orders: {e}")
+                logger.error(f"[Broker Sync L{lvl}] Error syncing positions: {e}")
 
-            for p in alpaca_positions:
-                ticker = p.symbol
-                qty = abs(int(float(p.qty)))
-                side = "BUY" if float(p.qty) > 0 else "SELL"
-                entry_p = float(p.avg_entry_price)
+    def _sync_sub_accounts_database(self):
+        """Syncs Alpaca broker balances, cash, and PnL to MySQL `sub_accounts` table."""
+        conn = None
+        cursor = None
+        try:
+            conn = get_mysql_connection()
+            cursor = conn.cursor()
+            for lvl, acct_ctx in self.etf_accounts.items():
+                if not acct_ctx.trading_client:
+                    continue
+                try:
+                    acct = acct_ctx.trading_client.get_account()
+                    pv = float(acct.portfolio_value or acct_ctx.portfolio_value)
+                    cash = float(acct.cash or acct_ctx.cash)
+                    acct_ctx.portfolio_value = pv
+                    acct_ctx.cash = cash
+                    acct_ctx.buying_power = float(acct.buying_power or acct_ctx.buying_power)
 
-                db_record = open_orders_map.get(ticker)
-                db_id = db_record["id"] if db_record else None
-                strat_name = (
-                    db_record["name"].replace(" Live", "")
-                    if db_record and db_record.get("name")
-                    else "MarketOpen_Catalyst"
-                )
+                    cursor.execute(
+                        "SELECT allocated_capital FROM sub_accounts WHERE id = %s",
+                        (acct_ctx.sub_account_id,)
+                    )
+                    row = cursor.fetchone()
+                    alloc_cap = float(row[0]) if (row and row[0]) else pv
+                    if alloc_cap <= 0:
+                        alloc_cap = pv
 
-                if side == "BUY":
-                    sl = round(entry_p * 0.970, 2)
-                    tp = round(entry_p * 1.035, 2)
-                else:
-                    sl = round(entry_p * 1.030, 2)
-                    tp = round(entry_p * 0.965, 2)
+                    invested = max(0.0, round(pv - cash, 2))
+                    pnl = round(pv - alloc_cap, 2)
+                    pnl_pct = round((pnl / alloc_cap) * 100, 4) if alloc_cap > 0 else 0.0
 
-                pos_id = f"{strat_name}_{ticker}_SYNC"
-                if not any(pos.get("ticker") == ticker for pos in self.active_positions.values()):
-                    self.active_positions[pos_id] = {
-                        "pos_id": pos_id,
-                        "alpaca_order_id": None,
-                        "strategy": strat_name,
-                        "ticker": ticker,
-                        "side": side,
-                        "entry_price": entry_p,
-                        "quantity": qty,
-                        "stop_loss": sl,
-                        "take_profit": tp,
-                        "initial_risk": abs(entry_p - sl),
-                        "be_trigger_r": 1.2,
-                        "breakeven_ratchet": False,
-                        "eod_flatten_time": dtime(15, 55),
-                        "entry_time": datetime.now(self.tz_est),
-                        "status": "OPEN",
-                        "db_order_id": db_id,
-                    }
-
-                if ticker not in self.active_watchlist:
-                    self.active_watchlist[ticker] = {
-                        "ticker": ticker,
-                        "pdh": None,
-                        "pdl": None,
-                        "pdc": None,
-                        "daily_atr": entry_p * 0.025,
-                        "trades_taken": 1,
-                        "swept_levels": set(),
-                    }
-                else:
-                    self.active_watchlist[ticker]["trades_taken"] = 1
-
-                logger.info(
-                    f"  ✅ [Broker Sync] Reconciled {ticker}: {qty} shares ({side}) @ ${entry_p:.2f} | DB Order ID: {db_id}"
-                )
-
-            self._persist_state()
+                    cursor.execute("""
+                        UPDATE sub_accounts
+                        SET current_value = %s,
+                            cash_balance = %s,
+                            invested_amount = %s,
+                            pnl = %s,
+                            pnl_percentage = %s,
+                            updated_at = NOW()
+                        WHERE id = %s;
+                    """, (pv, cash, invested, pnl, pnl_pct, acct_ctx.sub_account_id))
+                except Exception as ex:
+                    logger.debug(f"Subaccount sync error for L{lvl}: {ex}")
+            conn.commit()
         except Exception as e:
-            logger.error(f"[Broker Sync Error] Failed to reconcile positions: {e}")
+            logger.warning(f"Notice updating sub_accounts table: {e}")
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
 
     def _emit_heartbeat(self, status: str = "RUNNING"):
         """Emits structured health telemetry to HEARTBEAT_FILE."""
@@ -384,10 +535,23 @@ class LiveNewsTraderService:
             "dry_run": self.dry_run,
             "portfolio_value": self.portfolio_value,
             "buying_power": self.buying_power,
+            "etf_tiers": {
+                lvl: {
+                    "name": ctx.name,
+                    "account_id": ctx.account_id,
+                    "portfolio_value": ctx.portfolio_value,
+                    "cash": ctx.cash,
+                    "buying_power": ctx.buying_power,
+                    "positions_count": len(ctx.active_positions),
+                }
+                for lvl, ctx in self.etf_accounts.items()
+            },
             "active_positions_count": len(self.active_positions),
             "watchlist_count": len(self.active_watchlist),
             "processed_signals_count": len(self.processed_signal_ids),
+            "premarket_catalysts_count": len(self.premarket_catalyst_queue),
             "closed_trades_today": len(self.daily_completed_trades),
+            "l1_dca_executed_date": self.l1_dca_executed_date.isoformat() if self.l1_dca_executed_date else None,
             "enabled_strategies": self.enabled_strategies,
         }
         try:
@@ -396,53 +560,51 @@ class LiveNewsTraderService:
         except Exception:
             pass
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # 1. MARKET TIMING & SESSION STATE MACHINE
-    # ─────────────────────────────────────────────────────────────────────────
-
     def get_market_session_state(self, now_est: Optional[datetime] = None) -> Tuple[str, datetime]:
         """
-        Determines current market phase:
-        - "WEEKEND": Friday 20:00 to Sunday 23:59 EST
-        - "PRE_MARKET": Mon-Fri 04:00 to 09:30 EST
-        - "REGULAR_TRADING": Mon-Fri 09:30 to 16:00 EST
-        - "AFTER_HOURS": Mon-Fri 16:00 to 20:00 EST
-        - "OVERNIGHT": Mon-Thu 20:00 to 04:00 EST next morning
+        Determines market phase:
+        - WEEKEND: Saturday or Sunday
+        - PRE_MARKET: Mon-Fri 04:00 - 09:30 EST
+        - REGULAR_TRADING: Mon-Fri 09:30 - 16:00 EST
+        - AFTER_HOURS: Mon-Fri 16:00 - 20:00 EST
+        - OVERNIGHT: Mon-Fri 20:00 - 04:00 EST
         """
-        if now_est is None:
-            now_est = datetime.now(self.tz_est)
+        weekday = now_est.weekday()
+        if weekday >= 5:
+            monday_open = (now_est + timedelta(days=(7 - weekday))).replace(
+                hour=9, minute=30, second=0, microsecond=0
+            )
+            return "WEEKEND", monday_open - now_est
 
-        weekday = now_est.weekday()  # 0=Monday, 4=Friday, 5=Saturday, 6=Sunday
-        t = now_est.time()
-
-        if weekday >= 5 or (weekday == 4 and t >= dtime(20, 0)):
-            return "WEEKEND", now_est
-
-        if dtime(4, 0) <= t < dtime(9, 30):
-            return "PRE_MARKET", now_est
-        elif dtime(9, 30) <= t < dtime(16, 0):
-            return "REGULAR_TRADING", now_est
-        elif dtime(16, 0) <= t < dtime(20, 0):
-            return "AFTER_HOURS", now_est
+        cur_time = now_est.time()
+        if cur_time < dtime(4, 0):
+            pre_start = now_est.replace(hour=4, minute=0, second=0, microsecond=0)
+            return "OVERNIGHT", pre_start - now_est
+        elif cur_time < dtime(9, 30):
+            market_open = now_est.replace(hour=9, minute=30, second=0, microsecond=0)
+            return "PRE_MARKET", market_open - now_est
+        elif cur_time <= dtime(16, 0):
+            market_close = now_est.replace(hour=16, minute=0, second=0, microsecond=0)
+            return "REGULAR_TRADING", market_close - now_est
+        elif cur_time <= dtime(20, 0):
+            overnight_start = now_est.replace(hour=20, minute=0, second=0, microsecond=0)
+            return "AFTER_HOURS", overnight_start - now_est
         else:
-            return "OVERNIGHT", now_est
+            next_day_pre = (now_est + timedelta(days=1)).replace(
+                hour=4, minute=0, second=0, microsecond=0
+            )
+            return "OVERNIGHT", next_day_pre - now_est
 
     def _check_and_reset_daily_session(self, now_est: datetime):
-        """Resets daily session variables when rolling over to a new calendar date."""
+        """Resets intraday counters and loads pre-market catalysts at the start of a new trading day."""
         today = now_est.date()
         if self.current_session_date != today:
             logger.info(f"=== New Trading Session Initialized: {today} ===")
             self.current_session_date = today
             self.active_watchlist.clear()
-            self.premarket_catalyst_queue.clear()
             self.daily_completed_trades.clear()
             self.qualified_7day_volatility_tickers.clear()
             self._load_premarket_signals_for_today(today)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 2. LIVE SIGNAL INGESTION & FEEDBACK LOOP
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _load_premarket_signals_for_today(self, target_date: date):
         """Loads signals for target_date including prior-day after-hours signals."""
         target_str = target_date.strftime("%Y-%m-%d")
@@ -644,8 +806,16 @@ class LiveNewsTraderService:
         now_est = datetime.now(self.tz_est)
         cur_time = now_est.time()
 
-        # Update portfolio value & buying power
+        # Update portfolio value & buying power across all ETF tiers
         self._update_account_balances()
+
+        # Strategy Engine -1: Level 1 Boomer Haven Index DCA (Daily 1% QQQ & SPY)
+        self._evaluate_l1_index_dca(now_est)
+
+        # Periodic subaccounts sync every 60 seconds
+        if time.time() - getattr(self, "last_subaccount_sync_time", 0) > 60:
+            self._sync_sub_accounts_database()
+            self.last_subaccount_sync_time = time.time()
 
         # Strategy Engine 0: Market Open Catalysts (09:30 - 09:45 AM EST)
         if cur_time >= dtime(9, 30) and cur_time < dtime(9, 50):
@@ -777,13 +947,17 @@ class LiveNewsTraderService:
     def _evaluate_market_open_catalysts(self, now_est: datetime):
         """
         Executes Market Open (09:30 AM EST) catalyst trades for all premarket news signals
-        (e.g., CON, CNQ) that arrived before market open.
+        (e.g., CON, CNQ) that arrived before market open. Routes strictly to Level 2.
         """
         if not self.premarket_catalyst_queue:
             return
 
         for ticker, sig in list(self.premarket_catalyst_queue.items()):
             ctx = self.active_watchlist.get(ticker)
+            if not ctx:
+                self._initialize_ticker_watchlist(ticker, sig)
+                ctx = self.active_watchlist.get(ticker)
+
             if not ctx or ctx.get("trades_taken", 0) >= 1:
                 continue
 
@@ -794,7 +968,15 @@ class LiveNewsTraderService:
                     current_price = float(candles_5m.iloc[-1]["close"])
 
             if not current_price or current_price <= 0:
-                logger.warning(f"[{ticker}] No real-time Alpaca price available for Market Open execution.")
+                try:
+                    import yfinance as yf
+                    tk_info = yf.Ticker(ticker).fast_info
+                    current_price = getattr(tk_info, "last_price", None)
+                except Exception:
+                    pass
+
+            if not current_price or current_price <= 0:
+                logger.warning(f"[{ticker}] No real-time price available for Market Open execution.")
                 continue
 
             daily_atr = ctx.get("daily_atr", current_price * 0.025)
@@ -840,6 +1022,96 @@ class LiveNewsTraderService:
                     eod_flatten_time=dtime(15, 55),
                 )
                 self.premarket_catalyst_queue.pop(ticker, None)
+
+
+    def _evaluate_l1_index_dca(self, now_est: datetime):
+        """
+        Executes Level 1 Boomer Haven ETF Daily Index DCA:
+        Buys QQQ (1% of L1 equity) and SPY (1% of L1 equity) once per trading day during market hours.
+        """
+        today = now_est.date()
+        if self.l1_dca_executed_date == today:
+            return
+
+        cur_time = now_est.time()
+        # Execute during regular trading hours after initial opening volatility (09:35 - 15:50 EST)
+        if cur_time < dtime(9, 35) or cur_time > dtime(15, 50):
+            return
+
+        l1 = self.etf_accounts.get(1)
+        if not l1 or not l1.trading_client:
+            return
+
+        logger.info("[L1 INDEX DCA TRIGGER] Executing daily index DCA on Boomer Haven ETF...")
+        pv = l1.portfolio_value
+        target_allocation_per_index = pv * 0.01  # 1% of total account
+
+        for symbol in ["QQQ", "SPY"]:
+            price = self.get_realtime_price(symbol)
+            if not price or price <= 0:
+                try:
+                    import yfinance as yf
+                    tk_info = yf.Ticker(symbol).fast_info
+                    price = getattr(tk_info, "last_price", None)
+                except Exception:
+                    pass
+
+            if not price or price <= 0:
+                logger.warning(f"[L1 DCA] Cannot fetch price for {symbol}. Will retry next tick.")
+                return
+
+            qty = floor(target_allocation_per_index / price)
+            if qty < 1:
+                qty = 1
+
+            total_amount = round(qty * price, 2)
+            logger.info(f"[L1 DCA BUY] {symbol} | {qty} shares @ ${price:.2f} (Total: ${total_amount:,.2f})")
+
+            alpaca_order_id = None
+            if not self.dry_run and l1.trading_client:
+                try:
+                    req = MarketOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY,
+                    )
+                    submitted = l1.trading_client.submit_order(req)
+                    alpaca_order_id = str(submitted.id)
+                    time.sleep(1.0)
+                    try:
+                        fill = l1.trading_client.get_order_by_id(alpaca_order_id)
+                        if fill and fill.filled_avg_price:
+                            price = float(fill.filled_avg_price)
+                            total_amount = round(qty * price, 2)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.error(f"[L1 DCA Alpaca Order Error] {symbol}: {e}")
+                    continue
+
+            pos_record = {
+                "pos_id": f"L1_Index_DCA_{symbol}_{datetime.now().strftime('%H%M%S')}",
+                "alpaca_order_id": alpaca_order_id,
+                "strategy": "Index_DCA",
+                "ticker": symbol,
+                "side": "BUY",
+                "entry_price": price,
+                "quantity": qty,
+                "stop_loss": round(price * 0.90, 2),
+                "take_profit": round(price * 1.20, 2),
+                "entry_time": datetime.now(self.tz_est),
+                "status": "Closed",
+                "etf_level": 1,
+            }
+            db_id = self._record_order_to_database(pos_record, total_amount, etf_level=1)
+            pos_record["db_order_id"] = db_id
+
+            self._notify_l1_dca_executed(symbol, qty, price, total_amount, alpaca_order_id)
+
+        self.l1_dca_executed_date = today
+        self._sync_sub_accounts_database()
+        self._persist_state()
 
     def _evaluate_aligned_catalyst_entry(
         self,
@@ -1365,6 +1637,21 @@ class LiveNewsTraderService:
     # 4. LIVE ORDER EXECUTION & DB ORDERS SYNCHRONIZATION
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # 4. MULTI-TIER ETF ORDER EXECUTION & DB ORDERS SYNCHRONIZATION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_etf_level_for_strategy(self, strategy_name: str) -> int:
+        """Determines target ETF level based on strategy rules."""
+        s = strategy_name.lower()
+        if "zed" in s or "institutional" in s or "sweep" in s or "liquidity" in s:
+            return 3  # Level 3: Diamond Hands
+        elif "reactor" in s or "fade" in s or "catalyst" in s or "marketopen" in s:
+            return 2  # Level 2: Steady Grind
+        elif "dca" in s or "index" in s or "boomer" in s:
+            return 1  # Level 1: Boomer Haven
+        return 3
+
     def _execute_live_trade(
         self,
         strategy_name: str,
@@ -1380,9 +1667,15 @@ class LiveNewsTraderService:
         eod_flatten_time: dtime = dtime(15, 50),
     ):
         """Sizes position by conviction-weighted risk, submits to Alpaca, and records to DB."""
-        # Strict single-position protection: prevent duplicate orders for the same ticker
-        if any(p.get("ticker") == ticker for p in self.active_positions.values()):
-            logger.info(f"[{ticker}] Active position already open in state. Skipping duplicate execution.")
+        target_level = self._get_etf_level_for_strategy(strategy_name)
+        etf_ctx = self.etf_accounts.get(target_level)
+        if not etf_ctx:
+            logger.error(f"ETF account context for Level {target_level} not found. Aborting execution.")
+            return
+
+        # Strict single-position protection: prevent duplicate orders for same ticker on this ETF
+        if any(p.get("ticker") == ticker and p.get("etf_level") == target_level for p in self.active_positions.values()):
+            logger.info(f"[{ticker}] Active position already open in ETF Level {target_level}. Skipping duplicate execution.")
             return
 
         if ctx.get("trades_taken", 0) >= 1:
@@ -1402,10 +1695,10 @@ class LiveNewsTraderService:
             ctx["trades_taken"] = max(0, ctx.get("trades_taken", 1) - 1)
             return
 
-        portfolio_to_risk = self.portfolio_value or self.initial_portfolio
+        portfolio_to_risk = etf_ctx.portfolio_value or (100000.0 if target_level == 2 else 1000000.0)
 
         # Strict 5% portfolio allocation cap per trade (prevents going all in)
-        MAX_TRADE_ALLOCATION_PCT = 0.05
+        MAX_TRADE_ALLOCATION_PCT = etf_ctx.max_trade_pct
         max_trade_notional = portfolio_to_risk * MAX_TRADE_ALLOCATION_PCT
         max_qty_from_capital = floor(max_trade_notional / max(0.01, entry_price))
 
@@ -1420,32 +1713,32 @@ class LiveNewsTraderService:
             qty = 1
 
         # Check broker buying power buffer
-        if hasattr(self, "buying_power") and self.buying_power > 0:
-            max_bp_qty = floor((self.buying_power * 0.90) / max(0.01, entry_price))
+        if etf_ctx.buying_power > 0:
+            max_bp_qty = floor((etf_ctx.buying_power * 0.90) / max(0.01, entry_price))
             qty = min(qty, max_bp_qty)
 
         if qty <= 0:
             logger.warning(
-                f"[{ticker}] Calculated quantity is 0 shares (5% Cap=${max_trade_notional:,.2f} | "
+                f"[{ticker}] Calculated quantity is 0 shares (ETF L{target_level} 5% Cap=${max_trade_notional:,.2f} | "
                 f"Entry=${entry_price:.2f}). Skipping order execution."
             )
             ctx["trades_taken"] = max(0, ctx.get("trades_taken", 1) - 1)
             return
 
         total_amount = round(qty * entry_price, 2)
-        pos_id = f"{strategy_name}_{ticker}_{datetime.now().strftime('%H%M%S')}"
+        pos_id = f"L{target_level}_{strategy_name}_{ticker}_{datetime.now().strftime('%H%M%S')}"
 
         actual_alloc_pct = (total_amount / portfolio_to_risk) if portfolio_to_risk > 0 else 0.0
         logger.info(
-            f"🚀 [ORDER TRIGGER] {strategy_name} | {ticker} {side} {qty} shares @ ${entry_price:.2f} | "
-            f"Notional=${total_amount:,.2f} ({actual_alloc_pct:.2%} of portfolio, <=5% cap) | "
+            f"[ORDER TRIGGER] Level {target_level} ({etf_ctx.name}) | {strategy_name} | {ticker} {side} {qty} shares @ ${entry_price:.2f} | "
+            f"Notional=${total_amount:,.2f} ({actual_alloc_pct:.2%} of L{target_level} PV, <=5% cap) | "
             f"SL=${stop_loss:.2f} | TP=${take_profit:.2f} | Risk=${risk_per_share * qty:,.2f} | {reason}"
         )
 
         alpaca_order_id = None
         if not self.dry_run:
-            if not self.trading_client:
-                logger.error("[Alpaca Error] Trading client not initialized. Cannot execute order.")
+            if not etf_ctx.trading_client:
+                logger.error(f"[Alpaca Error] Trading client for ETF Level {target_level} not initialized. Cannot execute order.")
                 return
 
             try:
@@ -1472,24 +1765,22 @@ class LiveNewsTraderService:
                     take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                     stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
                 )
-                submitted = self.trading_client.submit_order(order_data=req)
+                submitted = etf_ctx.trading_client.submit_order(order_data=req)
                 alpaca_order_id = str(submitted.id)
-                logger.info(f"✅ [Alpaca Bracket Order Placed] Order ID: {alpaca_order_id} | Status: {submitted.status}")
+                logger.info(f"[Alpaca L{target_level} Bracket Order Placed] Order ID: {alpaca_order_id} | Status: {submitted.status}")
 
-                # Wait briefly for execution fill confirmation from Alpaca
                 time.sleep(1.0)
                 try:
-                    fill_chk = self.trading_client.get_order_by_id(alpaca_order_id)
+                    fill_chk = etf_ctx.trading_client.get_order_by_id(alpaca_order_id)
                     if fill_chk and fill_chk.filled_avg_price:
                         entry_price = float(fill_chk.filled_avg_price)
                         total_amount = round(qty * entry_price, 2)
-                        logger.info(f"🎯 [Alpaca Fill Confirmed] Actual Fill Price: ${entry_price:.2f} (Total: ${total_amount:,.2f})")
+                        logger.info(f"[Alpaca Fill Confirmed] Actual Fill Price: ${entry_price:.2f} (Total: ${total_amount:,.2f})")
                 except Exception:
                     pass
             except Exception as e:
-                logger.error(f"❌ [Alpaca Order REJECTED/FAILED] Could not submit {side} order for {ticker}: {e}")
+                logger.error(f"[Alpaca L{target_level} Order REJECTED/FAILED] Could not submit {side} order for {ticker}: {e}")
                 ctx["trades_taken"] = max(0, ctx.get("trades_taken", 1) - 1)
-                # CRITICAL: DO NOT RECORD REJECTED ORDERS TO DB!
                 return
 
         # Record into active positions state
@@ -1509,21 +1800,24 @@ class LiveNewsTraderService:
             "eod_flatten_time": eod_flatten_time,
             "entry_time": datetime.now(self.tz_est),
             "status": "OPEN",
+            "etf_level": target_level,
             "db_order_id": None,
         }
 
-        # Write to MySQL `orders` table
-        db_id = self._record_order_to_database(pos_record, total_amount)
+        # Write to MySQL `orders` table with exact etf_level and prefix
+        db_id = self._record_order_to_database(pos_record, total_amount, etf_level=target_level)
         pos_record["db_order_id"] = db_id
 
         self.active_positions[pos_id] = pos_record
+        etf_ctx.active_positions[pos_id] = pos_record
         self._persist_state()
+        self._sync_sub_accounts_database()
 
         # Send Real-Time Alert to Telegram Trades Bot (@gotti_trades_bot)
         self._notify_trade_opened(pos_record, total_amount, reason)
 
-    def _record_order_to_database(self, pos: Dict[str, Any], total_amount: float) -> Optional[int]:
-        """Inserts trade record into MySQL `orders` table."""
+    def _record_order_to_database(self, pos: Dict[str, Any], total_amount: float, etf_level: int = 3) -> Optional[int]:
+        """Inserts trade record into MySQL `orders` table with etf_level."""
         conn = None
         cursor = None
         try:
@@ -1532,26 +1826,35 @@ class LiveNewsTraderService:
             order_date_str = pos["entry_time"].strftime("%d/%m/%y")
             query = """
             INSERT INTO orders (
-                order_date, symbol, name, status, buy_price, sell_price, profit, order_amount, total_amount, order_type
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                order_date, symbol, name, etf_level, status, buy_price, sell_price, profit, order_amount, total_amount, order_type
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """
             buy_px = pos["entry_price"] if pos["side"] == "BUY" else None
             sell_px = pos["entry_price"] if pos["side"] == "SELL" else None
+            level_tag = f"[L{etf_level}]"
+            strat_name = pos['strategy']
+            if not strat_name.startswith("[L"):
+                full_name = f"{level_tag} {strat_name} Live"
+            else:
+                full_name = f"{strat_name} Live" if not strat_name.endswith("Live") else strat_name
+
             params = (
                 order_date_str,
                 pos["ticker"],
-                f"{pos['strategy']} Live",
-                "Open",
+                full_name,
+                etf_level,
+                pos.get("status", "Open"),
                 buy_px,
                 sell_px,
-                None,
+                pos.get("profit"),
                 pos["quantity"],
                 total_amount,
                 pos["side"].capitalize(),
             )
             cursor.execute(query, params)
+            conn.commit()
             db_id = cursor.lastrowid
-            logger.info(f"Recorded order in MySQL `orders` table (ID: {db_id}).")
+            logger.info(f"Recorded order in MySQL `orders` table (ID: {db_id}, ETF: L{etf_level}, Name: {full_name}).")
             return db_id
         except Exception as e:
             logger.error(f"Failed to record order to MySQL `orders` table: {e}")
@@ -1582,6 +1885,7 @@ class LiveNewsTraderService:
             s_px = exit_price if pos["side"] == "BUY" else pos["entry_price"]
             b_px = pos["entry_price"] if pos["side"] == "BUY" else exit_price
             cursor.execute(query, (s_px, b_px, round(profit, 2), pos["db_order_id"]))
+            conn.commit()
             logger.info(f"Updated MySQL `orders` table for Order #{pos['db_order_id']}: Status=Closed, Profit=${profit:+,.2f}")
         except Exception as e:
             logger.error(f"Failed to update order in MySQL: {e}")
@@ -1609,7 +1913,6 @@ class LiveNewsTraderService:
             entry_p = pos["entry_price"]
             initial_risk = pos["initial_risk"]
 
-            # Current price lookup directly from Alpaca
             current_price = self.get_realtime_price(ticker) or entry_p
 
             gain = (current_price - entry_p) if side == "BUY" else (entry_p - current_price)
@@ -1619,12 +1922,12 @@ class LiveNewsTraderService:
             if not pos.get("breakeven_ratchet", False) and r_mult >= pos.get("be_trigger_r", 1.2):
                 pos["stop_loss"] = entry_p
                 pos["breakeven_ratchet"] = True
-                logger.info(f"🔒 [BREAKEVEN RATCHET] {ticker} reached +{r_mult:.1f}R! Stop loss moved to Entry (${entry_p:.2f}).")
+                logger.info(f"[BREAKEVEN RATCHET] {ticker} reached +{r_mult:.1f}R! Stop loss moved to Entry (${entry_p:.2f}).")
 
             # 2. Strict EOD Flatten
             eod_time = pos.get("eod_flatten_time", dtime(15, 50))
             if cur_time >= eod_time:
-                logger.info(f"⏰ [EOD FLATTEN] Flattening {ticker} ({pos['strategy']}) at {cur_time.strftime('%H:%M:%S')} EST.")
+                logger.info(f"[EOD FLATTEN] Flattening {ticker} ({pos['strategy']}) at {cur_time.strftime('%H:%M:%S')} EST.")
                 self._close_position(pos, exit_price=current_price, exit_reason="EOD_FLATTEN")
                 closed_ids.append(pos_id)
                 continue
@@ -1653,27 +1956,28 @@ class LiveNewsTraderService:
             self._persist_state()
 
     def _close_position(self, pos: Dict[str, Any], exit_price: float, exit_reason: str):
-        """Flattens position with Alpaca broker and finalizes accounting."""
+        """Flattens position with Alpaca broker for its respective ETF tier and finalizes accounting."""
         ticker = pos["ticker"]
         side = pos["side"]
         qty = pos["quantity"]
+        target_level = pos.get("etf_level", 3)
+        etf_ctx = self.etf_accounts.get(target_level)
 
-        # Cancel open orders for this ticker and close position via Alpaca
-        if not self.dry_run and self.trading_client:
+        if not self.dry_run and etf_ctx and etf_ctx.trading_client:
             try:
                 try:
                     req_orders = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker])
-                    ticker_orders = self.trading_client.get_orders(req_orders)
+                    ticker_orders = etf_ctx.trading_client.get_orders(req_orders)
                     for o in ticker_orders:
-                        self.trading_client.cancel_order_by_id(o.id)
+                        etf_ctx.trading_client.cancel_order_by_id(o.id)
                 except Exception:
                     pass
                 try:
-                    self.trading_client.close_position(ticker)
+                    etf_ctx.trading_client.close_position(ticker)
                 except Exception:
                     pass
             except Exception as e:
-                logger.warning(f"Notice closing position via Alpaca: {e}")
+                logger.warning(f"Notice closing position via Alpaca L{target_level}: {e}")
 
         # Realized P&L
         if side == "BUY":
@@ -1687,19 +1991,28 @@ class LiveNewsTraderService:
         pos["profit"] = profit
 
         logger.info(
-            f"✅ [POSITION CLOSED] {pos['strategy']} | {ticker} | Exit: ${exit_price:.2f} | "
+            f"[POSITION CLOSED] L{target_level} | {pos['strategy']} | {ticker} | Exit: ${exit_price:.2f} | "
             f"P&L: ${profit:+,.2f} | Reason: {exit_reason}"
         )
 
         self._update_order_in_database(pos, exit_price, profit)
         self.daily_completed_trades.append(pos)
         self._notify_trade_closed(pos, exit_price, profit, exit_reason)
+        self._sync_sub_accounts_database()
 
     def _notify_trade_opened(self, pos: Dict[str, Any], notional: float, reason: str):
         """Dispatches rich HTML alert to Telegram @gotti_trades_bot upon new execution."""
+        lvl = pos.get("etf_level", 3)
+        lvl_icons = {
+            1: "🛡️ [Level 1: Boomer Haven ETF]",
+            2: "⚖️ [Level 2: Steady Grind ETF]",
+            3: "🚀 [Level 3: Diamond Hands ETF]",
+        }
+        lvl_header = lvl_icons.get(lvl, f"[Level {lvl} ETF]")
         side_icon = "🟢 BUY" if pos["side"] == "BUY" else "🔴 SELL"
         msg = (
-            f"🚀 <b>NEW TRADE EXECUTED</b>\n\n"
+            "🚀 <b>NEW TRADE EXECUTED</b>\n\n"
+            f"<b>Portfolio Tier:</b> <code>{lvl_header}</code>\n"
             f"<b>Strategy:</b> <code>{pos['strategy']}</code>\n"
             f"<b>Asset:</b> <b>{pos['ticker']}</b> | {side_icon}\n"
             f"<b>Quantity:</b> <code>{pos['quantity']:,}</code> shares\n"
@@ -1708,40 +2021,65 @@ class LiveNewsTraderService:
             f"<b>Bracket SL:</b> <code>${pos['stop_loss']:.2f}</code> | <b>TP:</b> <code>${pos['take_profit']:.2f}</code>\n"
             f"<b>Broker Order ID:</b> <code>{pos.get('alpaca_order_id') or 'N/A'}</code>\n"
             f"<b>Confluence:</b> <i>{html.escape(reason)}</i>\n\n"
-            f"<i>⚡ Tracked live on Level 3 Diamond Hands ETF</i>"
+            f"<i>⚡ Tracked live on {lvl_header}</i>"
         )
         self._notify_telegram(msg)
 
     def _notify_trade_closed(self, pos: Dict[str, Any], exit_price: float, profit: float, exit_reason: str):
         """Dispatches rich HTML alert to Telegram @gotti_trades_bot upon position close."""
+        lvl = pos.get("etf_level", 3)
+        lvl_icons = {
+            1: "🛡️ [Level 1: Boomer Haven ETF]",
+            2: "⚖️ [Level 2: Steady Grind ETF]",
+            3: "🚀 [Level 3: Diamond Hands ETF]",
+        }
+        lvl_header = lvl_icons.get(lvl, f"[Level {lvl} ETF]")
         pnl_badge = "🟢" if profit > 0 else ("🔴" if profit < 0 else "⚪")
         cost = pos["quantity"] * pos["entry_price"]
         pct = (profit / cost * 100) if cost > 0 else 0.0
         msg = (
-            f"🏁 <b>POSITION CLOSED</b>\n\n"
+            "🏁 <b>POSITION CLOSED</b>\n\n"
+            f"<b>Portfolio Tier:</b> <code>{lvl_header}</code>\n"
             f"<b>Strategy:</b> <code>{pos['strategy']}</code>\n"
             f"<b>Asset:</b> <b>{pos['ticker']}</b> ({pos['side']})\n"
             f"<b>Exit Price:</b> <code>${exit_price:.2f}</code> (Entry: ${pos['entry_price']:.2f})\n"
             f"<b>Realized P&L:</b> {pnl_badge} <b><code>${profit:+,.2f}</code></b> (<b>{pct:+.2f}%</b>)\n"
             f"<b>Exit Reason:</b> <code>{exit_reason}</code>\n"
             f"<b>Executed At:</b> <code>{datetime.now(self.tz_est).strftime('%H:%M:%S EST')}</code>\n\n"
-            f"<i>💡 Use /trades or /pnl in @gotti_trades_bot to view updated performance.</i>"
+            "<i>💡 Use /trades or /pnl in @gotti_trades_bot to view updated performance.</i>"
+        )
+        self._notify_telegram(msg)
+
+    def _notify_l1_dca_executed(self, symbol: str, qty: int, price: float, notional: float, order_id: Optional[str]):
+        """Dispatches notification for Level 1 Index DCA execution."""
+        msg = (
+            "🛡️ <b>DAILY INDEX DCA EXECUTED</b>\n\n"
+            "<b>Portfolio Tier:</b> <code>Level 1: Boomer Haven ETF</code>\n"
+            "<b>Strategy:</b> <code>Index_DCA (Daily 1% Accumulation)</code>\n"
+            f"<b>Asset:</b> <b>{symbol}</b> | 🟢 BUY\n"
+            f"<b>Quantity:</b> <code>{qty:,}</code> shares\n"
+            f"<b>Executed Price:</b> <code>${price:.2f}</code>\n"
+            f"<b>Total Allocation:</b> <code>${notional:,.2f}</code> (~1.0% of L1 Equity)\n"
+            f"<b>Broker Order ID:</b> <code>{order_id or 'N/A'}</code>\n\n"
+            "<i>🏛️ Managed by Gotti Defensive Fund Accumulation</i>"
         )
         self._notify_telegram(msg)
 
     def _update_account_balances(self):
-        """Refreshes account balance and portfolio value from Alpaca broker."""
-        if not self.dry_run and self.trading_client:
-            try:
-                acct = self.trading_client.get_account()
-                self.portfolio_value = float(acct.portfolio_value or self.initial_portfolio)
-                self.buying_power = float(acct.buying_power or self.initial_portfolio)
-            except Exception:
-                pass
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 6. CONTINUOUS 24/7 DAEMON SERVICE LOOP
-    # ─────────────────────────────────────────────────────────────────────────
+        """Refreshes account balance and portfolio value from Alpaca broker across all ETF tiers."""
+        if not self.dry_run:
+            for lvl, etf_ctx in self.etf_accounts.items():
+                if etf_ctx.trading_client:
+                    try:
+                        acct = etf_ctx.trading_client.get_account()
+                        etf_ctx.portfolio_value = float(acct.portfolio_value or etf_ctx.portfolio_value)
+                        etf_ctx.buying_power = float(acct.buying_power or etf_ctx.buying_power)
+                        etf_ctx.cash = float(acct.cash or etf_ctx.cash)
+                    except Exception:
+                        pass
+            if 3 in self.etf_accounts:
+                self.portfolio_value = self.etf_accounts[3].portfolio_value
+                self.buying_power = self.etf_accounts[3].buying_power
 
     def run_all_the_time(self):
         """Main service daemon loop executing continuously 24/7 with real-time observer."""
