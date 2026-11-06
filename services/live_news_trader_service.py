@@ -215,6 +215,7 @@ class LiveNewsTraderService:
                 f"Account: {self.account_id} | Portfolio: ${self.portfolio_value:,.2f} | "
                 f"Buying Power: ${self.buying_power:,.2f}"
             )
+            self._sync_active_positions_from_broker()
         except Exception as e:
             logger.error(f"Failed to connect to Alpaca API: {e}. Falling back to DRY-RUN mode.")
             self.dry_run = True
@@ -236,22 +237,40 @@ class LiveNewsTraderService:
             logger.debug(f"Telegram notification error: {e}")
 
     def _load_persisted_state(self):
-        """Loads processed signal IDs and state from disk if available."""
+        """Loads processed signal IDs and active positions from disk if available."""
         if os.path.exists(STATE_FILE):
             try:
                 with open(STATE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.processed_signal_ids = set(data.get("processed_signal_ids", []))
-                    logger.info(f"Loaded {len(self.processed_signal_ids)} processed signal IDs from state file.")
+                    raw_positions = data.get("active_positions", {})
+                    for pid, pos in raw_positions.items():
+                        if "entry_time" in pos and isinstance(pos["entry_time"], str):
+                            pos["entry_time"] = datetime.fromisoformat(pos["entry_time"])
+                        if "eod_flatten_time" in pos and isinstance(pos["eod_flatten_time"], str):
+                            parts = [int(x) for x in pos["eod_flatten_time"].split(":")]
+                            pos["eod_flatten_time"] = dtime(*parts)
+                        self.active_positions[pid] = pos
+                    logger.info(f"Loaded {len(self.processed_signal_ids)} processed signal IDs and {len(self.active_positions)} active positions from state file.")
             except Exception as e:
                 logger.warning(f"Could not load state file: {e}")
 
     def _persist_state(self):
-        """Saves processed signals and state to disk."""
+        """Saves processed signals, active positions, and state to disk."""
         try:
+            serializable_positions = {}
+            for pid, pos in self.active_positions.items():
+                p_copy = dict(pos)
+                if "entry_time" in p_copy and isinstance(p_copy["entry_time"], datetime):
+                    p_copy["entry_time"] = p_copy["entry_time"].isoformat()
+                if "eod_flatten_time" in p_copy and isinstance(p_copy["eod_flatten_time"], dtime):
+                    p_copy["eod_flatten_time"] = p_copy["eod_flatten_time"].strftime("%H:%M:%S")
+                serializable_positions[pid] = p_copy
+
             data = {
                 "last_saved": datetime.now(self.tz_est).isoformat(),
                 "processed_signal_ids": list(self.processed_signal_ids),
+                "active_positions": serializable_positions,
                 "active_positions_count": len(self.active_positions),
                 "daily_trades_count": len(self.daily_completed_trades),
             }
@@ -259,6 +278,99 @@ class LiveNewsTraderService:
                 json.dump(data, f, indent=2)
         except Exception as e:
             logger.warning(f"Could not save state file: {e}")
+
+    def _sync_active_positions_from_broker(self):
+        """
+        Synchronizes open positions on Alpaca with in-memory state and MySQL on startup.
+        Ensures restart-safety and continuous EOD flatten & stop management.
+        """
+        if not self.trading_client or self.dry_run:
+            return
+
+        try:
+            alpaca_positions = self.trading_client.get_all_positions()
+            if not alpaca_positions:
+                logger.info("[Broker Sync] No active open positions on Alpaca.")
+                return
+
+            logger.info(f"[Broker Sync] Reconciling {len(alpaca_positions)} open positions from Alpaca...")
+
+            open_orders_map = {}
+            try:
+                conn = get_mysql_connection()
+                cur = conn.cursor(dictionary=True)
+                cur.execute("SELECT * FROM orders WHERE status = 'Open' ORDER BY id DESC")
+                for r in cur.fetchall():
+                    sym = r["symbol"].upper()
+                    if sym not in open_orders_map:
+                        open_orders_map[sym] = r
+                cur.close()
+                conn.close()
+            except Exception as e:
+                logger.warning(f"[Broker Sync] Could not query MySQL open orders: {e}")
+
+            for p in alpaca_positions:
+                ticker = p.symbol
+                qty = abs(int(float(p.qty)))
+                side = "BUY" if float(p.qty) > 0 else "SELL"
+                entry_p = float(p.avg_entry_price)
+
+                db_record = open_orders_map.get(ticker)
+                db_id = db_record["id"] if db_record else None
+                strat_name = (
+                    db_record["name"].replace(" Live", "")
+                    if db_record and db_record.get("name")
+                    else "MarketOpen_Catalyst"
+                )
+
+                if side == "BUY":
+                    sl = round(entry_p * 0.970, 2)
+                    tp = round(entry_p * 1.035, 2)
+                else:
+                    sl = round(entry_p * 1.030, 2)
+                    tp = round(entry_p * 0.965, 2)
+
+                pos_id = f"{strat_name}_{ticker}_SYNC"
+                if not any(pos.get("ticker") == ticker for pos in self.active_positions.values()):
+                    self.active_positions[pos_id] = {
+                        "pos_id": pos_id,
+                        "alpaca_order_id": None,
+                        "strategy": strat_name,
+                        "ticker": ticker,
+                        "side": side,
+                        "entry_price": entry_p,
+                        "quantity": qty,
+                        "stop_loss": sl,
+                        "take_profit": tp,
+                        "initial_risk": abs(entry_p - sl),
+                        "be_trigger_r": 1.2,
+                        "breakeven_ratchet": False,
+                        "eod_flatten_time": dtime(15, 55),
+                        "entry_time": datetime.now(self.tz_est),
+                        "status": "OPEN",
+                        "db_order_id": db_id,
+                    }
+
+                if ticker not in self.active_watchlist:
+                    self.active_watchlist[ticker] = {
+                        "ticker": ticker,
+                        "pdh": None,
+                        "pdl": None,
+                        "pdc": None,
+                        "daily_atr": entry_p * 0.025,
+                        "trades_taken": 1,
+                        "swept_levels": set(),
+                    }
+                else:
+                    self.active_watchlist[ticker]["trades_taken"] = 1
+
+                logger.info(
+                    f"  ✅ [Broker Sync] Reconciled {ticker}: {qty} shares ({side}) @ ${entry_p:.2f} | DB Order ID: {db_id}"
+                )
+
+            self._persist_state()
+        except Exception as e:
+            logger.error(f"[Broker Sync Error] Failed to reconcile positions: {e}")
 
     def _emit_heartbeat(self, status: str = "RUNNING"):
         """Emits structured health telemetry to HEARTBEAT_FILE."""
