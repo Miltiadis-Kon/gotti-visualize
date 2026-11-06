@@ -1831,12 +1831,9 @@ class LiveNewsTraderService:
             """
             buy_px = pos["entry_price"] if pos["side"] == "BUY" else None
             sell_px = pos["entry_price"] if pos["side"] == "SELL" else None
-            level_tag = f"[L{etf_level}]"
             strat_name = pos['strategy']
-            if not strat_name.startswith("[L"):
-                full_name = f"{level_tag} {strat_name} Live"
-            else:
-                full_name = f"{strat_name} Live" if not strat_name.endswith("Live") else strat_name
+            # Do not add [L1], [L2], [L3] to order names per user requirement
+            full_name = f"{strat_name} Live" if not strat_name.endswith("Live") else strat_name
 
             params = (
                 order_date_str,
@@ -1924,7 +1921,10 @@ class LiveNewsTraderService:
                 pos["breakeven_ratchet"] = True
                 logger.info(f"[BREAKEVEN RATCHET] {ticker} reached +{r_mult:.1f}R! Stop loss moved to Entry (${entry_p:.2f}).")
 
-            # 2. Strict EOD Flatten
+            # 2. Strict EOD Flatten (NEVER flatten Level 1 Index DCA Buy & Hold)
+            if pos.get("strategy") == "Index_DCA" or pos.get("etf_level") == 1:
+                continue
+
             eod_time = pos.get("eod_flatten_time", dtime(15, 50))
             if cur_time >= eod_time:
                 logger.info(f"[EOD FLATTEN] Flattening {ticker} ({pos['strategy']}) at {cur_time.strftime('%H:%M:%S')} EST.")
