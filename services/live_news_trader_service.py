@@ -45,8 +45,8 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockLatestBarRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 
 from lumibot.brokers import Alpaca
 from lumibot.entities import Asset, Order
@@ -1326,6 +1326,19 @@ class LiveNewsTraderService:
                 return
 
             try:
+                # Alpaca bracket validation safety guard: ensure SL & TP are strictly on correct sides of entry
+                min_spread = max(0.05, round(entry_price * 0.005, 2))
+                if side.upper() == "BUY":
+                    if stop_loss >= entry_price - min_spread:
+                        stop_loss = round(entry_price - min_spread, 2)
+                    if take_profit <= entry_price + min_spread:
+                        take_profit = round(entry_price + min_spread, 2)
+                else:  # SELL / Short
+                    if stop_loss <= entry_price + min_spread:
+                        stop_loss = round(entry_price + min_spread, 2)
+                    if take_profit >= entry_price - min_spread:
+                        take_profit = round(entry_price - min_spread, 2)
+
                 order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
                 req = MarketOrderRequest(
                     symbol=ticker,
@@ -1522,11 +1535,14 @@ class LiveNewsTraderService:
         side = pos["side"]
         qty = pos["quantity"]
 
-        # Cancel open orders and close via Alpaca
+        # Cancel open orders for this ticker and close position via Alpaca
         if not self.dry_run and self.trading_client:
             try:
                 try:
-                    self.trading_client.cancel_orders()
+                    req_orders = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker])
+                    ticker_orders = self.trading_client.get_orders(req_orders)
+                    for o in ticker_orders:
+                        self.trading_client.cancel_order_by_id(o.id)
                 except Exception:
                     pass
                 try:
