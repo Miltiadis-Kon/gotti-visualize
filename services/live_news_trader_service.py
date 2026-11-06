@@ -39,6 +39,15 @@ if BASE_DIR not in sys.path:
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+import html
+import requests
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockLatestBarRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+
 from lumibot.brokers import Alpaca
 from lumibot.entities import Asset, Order
 
@@ -104,20 +113,28 @@ class LiveNewsTraderService:
             "News_LiquiditySweep",
             "MarketReactor_Fade",
             "ZedStrategy_Institutional",
+            "MarketOpen_Catalyst",
         ]
         self.initial_portfolio = initial_portfolio
 
         self.tz_est = pytz.timezone("America/New_York")
         self.running = True
 
-        # Broker connection
+        # Broker connection & clients
         self.broker: Optional[Alpaca] = None
+        self.trading_client: Optional[TradingClient] = None
+        self.data_client: Optional[StockHistoricalDataClient] = None
         self.account_id: Optional[str] = None
         self.portfolio_value: float = initial_portfolio
         self.buying_power: float = initial_portfolio
 
-        # State tracking
+        # Telegram reporting (@gotti_trades_bot)
+        self.telegram_token = os.getenv("TELEGRAM_TRADES_BOT_TOKEN", "9051838449:AAF6qwEyBlMeVqA6Yy-fg6gDOoD8JZJDIHQ")
+        self.telegram_chat_id = os.getenv("TELEGRAM_TRADES_CHAT_ID", os.getenv("TELEGRAM_SIGNALS_CHAT_ID", "8139983484"))
+
+        # State tracking & Premarket Queue
         self.processed_signal_ids: Set[str] = set()
+        self.premarket_catalyst_queue: Dict[str, ReactorSignal] = {}  # ticker -> premarket signal for open execution
         self.session_signals: Dict[str, ReactorSignal] = {}  # ticker -> latest signal
         self.active_watchlist: Dict[str, Dict[str, Any]] = {}  # ticker -> technical levels & context
         self.active_positions: Dict[str, Dict[str, Any]] = {}  # pos_id -> position details
@@ -187,8 +204,10 @@ class LiveNewsTraderService:
         }
 
         try:
+            self.trading_client = TradingClient(api_key, api_secret, paper=self.paper)
+            self.data_client = StockHistoricalDataClient(api_key, api_secret)
             self.broker = Alpaca(config)
-            acct = self.broker.api.get_account()
+            acct = self.trading_client.get_account()
             self.account_id = str(acct.id)
             self.portfolio_value = float(acct.portfolio_value or self.initial_portfolio)
             self.buying_power = float(acct.buying_power or self.initial_portfolio)
@@ -202,6 +221,22 @@ class LiveNewsTraderService:
         except Exception as e:
             logger.error(f"Failed to connect to Alpaca API: {e}. Falling back to DRY-RUN mode.")
             self.dry_run = True
+
+    def _notify_telegram(self, text: str):
+        """Sends rich formatted alert to the dedicated Telegram Trades Bot (@gotti_trades_bot)."""
+        if not self.telegram_token or not self.telegram_chat_id:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+            payload = {
+                "chat_id": self.telegram_chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            requests.post(url, json=payload, timeout=5)
+        except Exception as e:
+            logger.debug(f"Telegram notification error: {e}")
 
     def _load_persisted_state(self):
         """Loads processed signal IDs and state from disk if available."""
@@ -290,6 +325,7 @@ class LiveNewsTraderService:
             logger.info(f"=== New Trading Session Initialized: {today} ===")
             self.current_session_date = today
             self.active_watchlist.clear()
+            self.premarket_catalyst_queue.clear()
             self.daily_completed_trades.clear()
             self.qualified_7day_volatility_tickers.clear()
             self._load_premarket_signals_for_today(today)
@@ -395,6 +431,15 @@ class LiveNewsTraderService:
 
         self.session_signals[ticker] = sig
 
+        # Track and queue premarket signals for Market Open (09:30 AM EST) execution
+        now_est = datetime.now(self.tz_est)
+        phase, _ = self.get_market_session_state(now_est)
+        if phase in ("PRE_MARKET", "OVERNIGHT", "WEEKEND", "AFTER_HOURS") or now_est.time() < dtime(9, 30):
+            self.premarket_catalyst_queue[ticker] = sig
+            logger.info(
+                f"📋 [PRE-MARKET QUEUE] Successfully queued {ticker} ({sig.signal_position}) for Market Open (09:30 AM EST) execution!"
+            )
+
         # Add to active watchlist if not already initialized
         if ticker not in self.active_watchlist:
             self._initialize_ticker_watchlist(ticker, sig)
@@ -409,24 +454,40 @@ class LiveNewsTraderService:
         is_qualified_zed = False
 
         try:
-            # Query bars via Alpaca or YFinance
+            # Query bars directly via Alpaca Market Data
             df = None
-            if self.broker and not self.dry_run:
+            if self.data_client:
+                try:
+                    from datetime import timezone
+                    start_utc = datetime.now(timezone.utc) - timedelta(days=45)
+                    req = StockBarsRequest(
+                        symbol_or_symbols=ticker,
+                        timeframe=TimeFrame.Day,
+                        start=start_utc,
+                    )
+                    bars = self.data_client.get_stock_bars(req)
+                    if bars and hasattr(bars, "df") and not bars.df.empty:
+                        df = bars.df
+                        if isinstance(df.index, pd.MultiIndex):
+                            if ticker in df.index.levels[0]:
+                                df = df.xs(ticker)
+                            else:
+                                df = df.droplevel(0)
+                        df.columns = [str(c).lower() for c in df.columns]
+                except Exception as e:
+                    logger.debug(f"Alpaca daily bars error for {ticker}: {e}")
+                    df = None
+
+            if (df is None or df.empty or len(df) < 2) and self.broker and not self.dry_run:
                 try:
                     asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
                     bars = self.broker.get_historical_prices(asset, 20, "day")
                     if bars is not None:
                         df = bars.df if hasattr(bars, "df") else bars
+                        if df is not None and not df.empty:
+                            df.columns = [str(c).lower() for c in df.columns]
                 except Exception:
                     df = None
-
-            if df is None or df.empty or len(df) < 2:
-                import yfinance as yf
-                df = yf.download(ticker, period="1mo", interval="1d", progress=False)
-                if not df.empty and isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [c[0].lower() for c in df.columns]
-                elif not df.empty:
-                    df.columns = [c.lower() for c in df.columns]
 
             if df is not None and not df.empty and len(df) >= 2:
                 pdc = float(df["close"].iloc[-2])
@@ -469,13 +530,17 @@ class LiveNewsTraderService:
     def evaluate_live_market(self):
         """
         Iterates over the active watchlist during Regular Trading Hours and
-        evaluates entry triggers for News_LiquiditySweep and MarketReactor_Fade.
+        evaluates entry triggers for all active strategy engines.
         """
         now_est = datetime.now(self.tz_est)
         cur_time = now_est.time()
 
         # Update portfolio value & buying power
         self._update_account_balances()
+
+        # Strategy Engine 0: Market Open Catalysts (09:30 - 09:45 AM EST)
+        if cur_time >= dtime(9, 30) and cur_time < dtime(9, 50):
+            self._evaluate_market_open_catalysts(now_est)
 
         # Iterate through watchlist tickers
         for ticker, ctx in list(self.active_watchlist.items()):
@@ -485,16 +550,24 @@ class LiveNewsTraderService:
             if ctx["trades_taken"] >= 1:
                 continue
 
-            # Fetch recent intraday 5m and 15m candles
+            # Fetch recent intraday 5m and 15m candles directly from Alpaca
             candles_5m, candles_15m = self._fetch_recent_intraday_candles(ticker)
             if candles_5m is None or candles_5m.empty:
                 continue
 
-            current_price = float(candles_5m.iloc[-1]["close"])
+            # Real-time execution price directly from Alpaca
+            current_price = self.get_realtime_price(ticker)
+            if not current_price or current_price <= 0:
+                current_price = float(candles_5m.iloc[-1]["close"])
 
             # Compute or update 15m Opening Range (9:30 - 9:45 AM EST)
             if cur_time >= dtime(9, 45) and ctx["or_high"] is None:
                 self._compute_opening_range(ticker, ctx, candles_5m)
+
+            # Strategy Engine 0B: Intraday Aligned Catalyst Entry for High-Conviction News (Selectors 1 & 3)
+            if any(s in self.enabled_strategies for s in ("MarketOpen_Catalyst", "HighBeta_CatalystOpen")) and sig.selector_id in (1, 3):
+                if cur_time >= dtime(9, 30) and cur_time < dtime(15, 45):
+                    self._evaluate_aligned_catalyst_entry(ticker, ctx, sig, current_price, now_est)
 
             # Strategy Engine 1: News_LiquiditySweep
             if "News_LiquiditySweep" in self.enabled_strategies and cur_time >= dtime(9, 45) and cur_time < dtime(15, 50):
@@ -516,23 +589,42 @@ class LiveNewsTraderService:
         self.manage_active_positions(now_est)
 
     def _fetch_recent_intraday_candles(self, ticker: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """Fetches 5m and 15m intraday candles for the active session."""
+        """
+        Fetches 5m and 15m intraday candles directly from Alpaca Market Data API.
+        Never relies on rate-limited or stale third-party providers.
+        """
         try:
-            import yfinance as yf
-            df = yf.download(ticker, period="5d", interval="5m", progress=False)
-            if df.empty:
+            if not self.data_client:
                 return None, None
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [c[0].lower() for c in df.columns]
-            else:
-                df.columns = [c.lower() for c in df.columns]
+
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            start_utc = now_utc - timedelta(days=5)
+
+            req = StockBarsRequest(
+                symbol_or_symbols=ticker,
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=start_utc,
+            )
+            bars = self.data_client.get_stock_bars(req)
+            if not bars or not hasattr(bars, "df") or bars.df.empty:
+                return None, None
+
+            df = bars.df
+            if isinstance(df.index, pd.MultiIndex):
+                if ticker in df.index.levels[0]:
+                    df = df.xs(ticker)
+                else:
+                    df = df.droplevel(0)
+
+            df.columns = [str(c).lower() for c in df.columns]
 
             if df.index.tz is not None:
                 df.index = df.index.tz_convert(self.tz_est)
             else:
                 df.index = df.index.tz_localize("UTC").tz_convert(self.tz_est)
 
-            # Explicit column resampling to avoid pandas NDFrame.first() offset error
+            # Explicit column resampling
             o = df["open"].resample("15min").first()
             h = df["high"].resample("15min").max()
             l = df["low"].resample("15min").min()
@@ -541,8 +633,154 @@ class LiveNewsTraderService:
             df_15m = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
             return df, df_15m
         except Exception as e:
-            logger.warning(f"Error fetching candles for {ticker}: {e}")
+            logger.warning(f"Error fetching Alpaca candles for {ticker}: {e}")
             return None, None
+
+    def get_realtime_price(self, ticker: str) -> Optional[float]:
+        """Fetches accurate real-time market price directly from Alpaca latest quote or bar."""
+        if not self.data_client:
+            return None
+        try:
+            q_req = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+            quotes = self.data_client.get_stock_latest_quote(q_req)
+            if quotes and ticker in quotes:
+                q = quotes[ticker]
+                bid = float(q.bid_price or 0.0)
+                ask = float(q.ask_price or 0.0)
+                if bid > 0 and ask > 0:
+                    return round((bid + ask) / 2.0, 2)
+                elif ask > 0:
+                    return round(ask, 2)
+                elif bid > 0:
+                    return round(bid, 2)
+        except Exception as e:
+            logger.debug(f"Could not fetch Alpaca quote for {ticker}: {e}")
+
+        try:
+            b_req = StockLatestBarRequest(symbol_or_symbols=ticker)
+            bars = self.data_client.get_stock_latest_bar(b_req)
+            if bars and ticker in bars and bars[ticker]:
+                return round(float(bars[ticker].close), 2)
+        except Exception:
+            pass
+        return None
+
+    def _evaluate_market_open_catalysts(self, now_est: datetime):
+        """
+        Executes Market Open (09:30 AM EST) catalyst trades for all premarket news signals
+        (e.g., CON, CNQ) that arrived before market open.
+        """
+        if not self.premarket_catalyst_queue:
+            return
+
+        for ticker, sig in list(self.premarket_catalyst_queue.items()):
+            ctx = self.active_watchlist.get(ticker)
+            if not ctx or ctx.get("trades_taken", 0) >= 1:
+                continue
+
+            current_price = self.get_realtime_price(ticker)
+            if not current_price or current_price <= 0:
+                candles_5m, _ = self._fetch_recent_intraday_candles(ticker)
+                if candles_5m is not None and not candles_5m.empty:
+                    current_price = float(candles_5m.iloc[-1]["close"])
+
+            if not current_price or current_price <= 0:
+                logger.warning(f"[{ticker}] No real-time Alpaca price available for Market Open execution.")
+                continue
+
+            daily_atr = ctx.get("daily_atr", current_price * 0.025)
+            pos_side = sig.signal_position  # "BUY" or "SELL"
+
+            if pos_side == "BUY":
+                atr_stop = max(current_price - (1.2 * daily_atr), current_price * 0.965)
+                sl = round(max(atr_stop, current_price * 0.970), 2)  # Max -3.0% Stop Loss
+                tp = round(current_price * 1.035, 2)  # +3.5% Take Profit
+                reason = f"Pre-Market Aligned Catalyst Open | {sig.news_sentiment} News ({sig.news_conviction:.0%}) | Fund: {sig.fundamental_sentiment} ({sig.fundamental_confidence:.0%})"
+
+                self._execute_live_trade(
+                    strategy_name="MarketOpen_Catalyst",
+                    ticker=ticker,
+                    side="BUY",
+                    entry_price=current_price,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    reason=reason,
+                    sig=sig,
+                    ctx=ctx,
+                    be_trigger_r=1.0,
+                    eod_flatten_time=dtime(15, 55),
+                )
+                self.premarket_catalyst_queue.pop(ticker, None)
+            elif pos_side == "SELL":
+                atr_stop = min(current_price + (1.2 * daily_atr), current_price * 1.035)
+                sl = round(min(atr_stop, current_price * 1.030), 2)  # Max +3.0% Stop Loss
+                tp = round(current_price * 0.965, 2)  # -3.5% Take Profit
+                reason = f"Pre-Market Bearish Catalyst Open | {sig.news_sentiment} News ({sig.news_conviction:.0%}) | Fund: {sig.fundamental_sentiment}"
+
+                self._execute_live_trade(
+                    strategy_name="MarketOpen_Catalyst",
+                    ticker=ticker,
+                    side="SELL",
+                    entry_price=current_price,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    reason=reason,
+                    sig=sig,
+                    ctx=ctx,
+                    be_trigger_r=1.0,
+                    eod_flatten_time=dtime(15, 55),
+                )
+                self.premarket_catalyst_queue.pop(ticker, None)
+
+    def _evaluate_aligned_catalyst_entry(
+        self,
+        ticker: str,
+        ctx: Dict[str, Any],
+        sig: ReactorSignal,
+        current_price: float,
+        now_est: datetime
+    ):
+        """Evaluates entry for high-conviction aligned catalyst signals during market hours."""
+        if ctx.get("trades_taken", 0) >= 1:
+            return
+
+        daily_atr = ctx.get("daily_atr", current_price * 0.025)
+        pos_side = sig.signal_position
+
+        if pos_side == "BUY":
+            sl = round(max(current_price - (1.2 * daily_atr), current_price * 0.970), 2)
+            tp = round(current_price * 1.035, 2)
+            reason = f"High-Conviction Aligned Catalyst Entry | {sig.news_sentiment} News ({sig.news_conviction:.0%}) | Fund: {sig.fundamental_sentiment}"
+            self._execute_live_trade(
+                strategy_name="MarketOpen_Catalyst",
+                ticker=ticker,
+                side="BUY",
+                entry_price=current_price,
+                stop_loss=sl,
+                take_profit=tp,
+                reason=reason,
+                sig=sig,
+                ctx=ctx,
+                be_trigger_r=1.0,
+                eod_flatten_time=dtime(15, 55),
+            )
+        elif pos_side == "SELL":
+            sl = round(min(current_price + (1.2 * daily_atr), current_price * 1.030), 2)
+            tp = round(current_price * 0.965, 2)
+            reason = f"High-Conviction Bearish Catalyst Entry | {sig.news_sentiment} News ({sig.news_conviction:.0%}) | Fund: {sig.fundamental_sentiment}"
+            self._execute_live_trade(
+                strategy_name="MarketOpen_Catalyst",
+                ticker=ticker,
+                side="SELL",
+                entry_price=current_price,
+                stop_loss=sl,
+                take_profit=tp,
+                reason=reason,
+                sig=sig,
+                ctx=ctx,
+                be_trigger_r=1.0,
+                eod_flatten_time=dtime(15, 55),
+            )
 
     def _compute_opening_range(self, ticker: str, ctx: Dict[str, Any], df_5m: pd.DataFrame):
         """Extracts 9:30 - 9:45 AM EST high and low."""
@@ -787,7 +1025,8 @@ class LiveNewsTraderService:
         if "QQQ" in self.active_watchlist:
             qqq_ctx = self.active_watchlist["QQQ"]
             qqq_pdc = qqq_ctx.get("pdc", 480.0)
-            if current_price < qqq_pdc:
+            qqq_px = self.get_realtime_price("QQQ") or qqq_pdc
+            if qqq_px < qqq_pdc:
                 qqq_regime = "BEAR_MARKET"
 
         tp_pct = 0.020  # +2.0% Take Profit
@@ -895,38 +1134,52 @@ class LiveNewsTraderService:
         if len(today_bars) < 3:
             return
 
-        # Fetch daily levels & 20D ATR
+        # Fetch daily levels & 20D ATR via Alpaca
         pdc = ctx.get("pdc")
         daily_atr = ctx.get("daily_atr")
         if not pdc or not daily_atr:
             try:
-                import yfinance as yf
-                df_1d = yf.download(ticker, period="30d", interval="1d", progress=False)
-                if not df_1d.empty and len(df_1d) >= 2:
-                    pdc = float(df_1d["Close"].iloc[-2])
-                    daily_atr = float(calculate_atr(df_1d, length=min(14, len(df_1d) - 1))) or (pdc * 0.025)
-                    ctx["pdc"] = pdc
-                    ctx["daily_atr"] = daily_atr
+                if self.data_client:
+                    from datetime import timezone
+                    start_utc = datetime.now(timezone.utc) - timedelta(days=40)
+                    req_d = StockBarsRequest(symbol_or_symbols=ticker, timeframe=TimeFrame.Day, start=start_utc)
+                    b_d = self.data_client.get_stock_bars(req_d)
+                    if b_d and hasattr(b_d, "df") and not b_d.df.empty:
+                        df_d = b_d.df
+                        if isinstance(df_d.index, pd.MultiIndex):
+                            df_d = df_d.xs(ticker) if ticker in df_d.index.levels[0] else df_d.droplevel(0)
+                        df_d.columns = [str(c).lower() for c in df_d.columns]
+                        if len(df_d) >= 2:
+                            pdc = float(df_d["close"].iloc[-2])
+                            daily_atr = float(calculate_atr(df_d, length=min(14, len(df_d) - 1))) or (pdc * 0.025)
+                            ctx["pdc"] = pdc
+                            ctx["daily_atr"] = daily_atr
             except Exception:
                 pass
 
         if not pdc or not daily_atr or (daily_atr / pdc) < 0.020:
             return
 
-        # Fetch QQQ 5m & higher-timeframe regime
+        # Fetch QQQ 5m & higher-timeframe regime via Alpaca
         qqq_5m = ctx.get("qqq_5m")
         qqq_regime = ctx.get("qqq_regime")
         if not qqq_regime:
             try:
-                import yfinance as yf
-                qqq_df = yf.download("QQQ", period="30d", interval="1d", progress=False)
-                qqq_5m_df = yf.download("QQQ", period="2d", interval="5m", progress=False)
-                if not qqq_df.empty:
-                    q_open = float(qqq_5m_df["Open"].iloc[0]) if not qqq_5m_df.empty else float(qqq_df["Open"].iloc[-1])
-                    q_curr = float(qqq_5m_df["Close"].iloc[-1]) if not qqq_5m_df.empty else float(qqq_df["Close"].iloc[-1])
-                    qqq_regime = CatalystConfluenceEngine.evaluate_market_regime(qqq_df.iloc[:-1], q_curr, q_open)
-                    ctx["qqq_regime"] = qqq_regime
-                    ctx["qqq_5m"] = qqq_5m_df
+                if self.data_client:
+                    from datetime import timezone
+                    start_utc = datetime.now(timezone.utc) - timedelta(days=5)
+                    req_q = StockBarsRequest(symbol_or_symbols="QQQ", timeframe=TimeFrame(5, TimeFrameUnit.Minute), start=start_utc)
+                    b_q = self.data_client.get_stock_bars(req_q)
+                    if b_q and hasattr(b_q, "df") and not b_q.df.empty:
+                        df_q = b_q.df
+                        if isinstance(df_q.index, pd.MultiIndex):
+                            df_q = df_q.xs("QQQ") if "QQQ" in df_q.index.levels[0] else df_q.droplevel(0)
+                        df_q.columns = [str(c).lower() for c in df_q.columns]
+                        q_open = float(df_q["open"].iloc[0])
+                        q_curr = float(df_q["close"].iloc[-1])
+                        qqq_regime = "BULL_MARKET" if q_curr >= q_open * 0.998 else "BEAR_MARKET"
+                        ctx["qqq_regime"] = qqq_regime
+                        ctx["qqq_5m"] = df_q
             except Exception:
                 qqq_regime = "BULL_MARKET"
 
@@ -958,7 +1211,7 @@ class LiveNewsTraderService:
         if qqq_5m is not None and len(qqq_5m) >= 2:
             q_last = qqq_5m.iloc[-1]
             q_prev = qqq_5m.iloc[-2]
-            q_dropping = float(q_last["Low"]) <= float(q_prev["Low"])
+            q_dropping = float(q_last["low"]) <= float(q_prev["low"])
             stock_holding = float(last_bar["low"]) >= float(prev_bar["low"])
             has_bullish_div = (not q_dropping) or stock_holding
 
@@ -1067,37 +1320,40 @@ class LiveNewsTraderService:
         )
 
         alpaca_order_id = None
-        if self.broker and not self.dry_run:
+        if not self.dry_run:
+            if not self.trading_client:
+                logger.error("[Alpaca Error] Trading client not initialized. Cannot execute order.")
+                return
+
             try:
-                # Direct Alpaca REST API bracket order (native & robust)
-                if hasattr(self.broker, "api") and self.broker.api:
-                    submitted = self.broker.api.submit_order(
-                        symbol=ticker,
-                        qty=qty,
-                        side=side.lower(),
-                        type="market",
-                        time_in_force="day",
-                        order_class="bracket",
-                        take_profit={"limit_price": round(take_profit, 2)},
-                        stop_loss={"stop_price": round(stop_loss, 2)},
-                    )
-                    alpaca_order_id = str(getattr(submitted, "id", pos_id))
-                    logger.info(f"[Alpaca REST Fill] Bracket order registered with ID: {alpaca_order_id}")
-                else:
-                    asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
-                    order = Order(
-                        asset=asset,
-                        quantity=qty,
-                        side=side.lower(),
-                        type="market",
-                        take_profit_price=round(take_profit, 2),
-                        stop_loss_price=round(stop_loss, 2),
-                    )
-                    submitted = self.broker.submit_order(order)
-                    alpaca_order_id = str(getattr(submitted, "id", pos_id))
-                    logger.info(f"[Alpaca Lumibot Fill] Bracket order registered with ID: {alpaca_order_id}")
+                order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
+                req = MarketOrderRequest(
+                    symbol=ticker,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                    order_class=OrderClass.BRACKET,
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                )
+                submitted = self.trading_client.submit_order(order_data=req)
+                alpaca_order_id = str(submitted.id)
+                logger.info(f"✅ [Alpaca Bracket Order Placed] Order ID: {alpaca_order_id} | Status: {submitted.status}")
+
+                # Wait briefly for execution fill confirmation from Alpaca
+                time.sleep(1.0)
+                try:
+                    fill_chk = self.trading_client.get_order_by_id(alpaca_order_id)
+                    if fill_chk and fill_chk.filled_avg_price:
+                        entry_price = float(fill_chk.filled_avg_price)
+                        total_amount = round(qty * entry_price, 2)
+                        logger.info(f"🎯 [Alpaca Fill Confirmed] Actual Fill Price: ${entry_price:.2f} (Total: ${total_amount:,.2f})")
+                except Exception:
+                    pass
             except Exception as e:
-                logger.error(f"[Alpaca Order Error] Could not submit order: {e}")
+                logger.error(f"❌ [Alpaca Order REJECTED/FAILED] Could not submit {side} order for {ticker}: {e}")
+                # CRITICAL: DO NOT RECORD REJECTED ORDERS TO DB!
+                return
 
         # Record into active positions state
         pos_record = {
@@ -1124,8 +1380,11 @@ class LiveNewsTraderService:
         pos_record["db_order_id"] = db_id
 
         self.active_positions[pos_id] = pos_record
-        ctx["trades_taken"] += 1
+        ctx["trades_taken"] = ctx.get("trades_taken", 0) + 1
         self._persist_state()
+
+        # Send Real-Time Alert to Telegram Trades Bot (@gotti_trades_bot)
+        self._notify_trade_opened(pos_record, total_amount, reason)
 
     def _record_order_to_database(self, pos: Dict[str, Any], total_amount: float) -> Optional[int]:
         """Inserts trade record into MySQL `orders` table."""
@@ -1214,14 +1473,8 @@ class LiveNewsTraderService:
             entry_p = pos["entry_price"]
             initial_risk = pos["initial_risk"]
 
-            # Current price lookup
-            current_price = entry_p
-            if self.broker and not self.dry_run:
-                try:
-                    asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
-                    current_price = float(self.broker.get_last_price(asset) or entry_p)
-                except Exception:
-                    pass
+            # Current price lookup directly from Alpaca
+            current_price = self.get_realtime_price(ticker) or entry_p
 
             gain = (current_price - entry_p) if side == "BUY" else (entry_p - current_price)
             r_mult = gain / initial_risk if initial_risk > 0 else 0.0
@@ -1264,28 +1517,24 @@ class LiveNewsTraderService:
             self._persist_state()
 
     def _close_position(self, pos: Dict[str, Any], exit_price: float, exit_reason: str):
-        """Flattens position with broker and finalizes accounting."""
+        """Flattens position with Alpaca broker and finalizes accounting."""
         ticker = pos["ticker"]
         side = pos["side"]
         qty = pos["quantity"]
 
         # Cancel open orders and close via Alpaca
-        if self.broker and not self.dry_run:
+        if not self.dry_run and self.trading_client:
             try:
-                if hasattr(self.broker, "api") and self.broker.api:
-                    try:
-                        self.broker.api.cancel_orders()
-                    except Exception:
-                        pass
-                    try:
-                        self.broker.api.close_position(ticker)
-                    except Exception:
-                        pass
-                else:
-                    asset = Asset(symbol=ticker, asset_type=Asset.AssetType.STOCK)
-                    self.broker.close_position(asset)
+                try:
+                    self.trading_client.cancel_orders()
+                except Exception:
+                    pass
+                try:
+                    self.trading_client.close_position(ticker)
+                except Exception:
+                    pass
             except Exception as e:
-                logger.warning(f"Notice closing position via broker: {e}")
+                logger.warning(f"Notice closing position via Alpaca: {e}")
 
         # Realized P&L
         if side == "BUY":
@@ -1305,14 +1554,49 @@ class LiveNewsTraderService:
 
         self._update_order_in_database(pos, exit_price, profit)
         self.daily_completed_trades.append(pos)
+        self._notify_trade_closed(pos, exit_price, profit, exit_reason)
+
+    def _notify_trade_opened(self, pos: Dict[str, Any], notional: float, reason: str):
+        """Dispatches rich HTML alert to Telegram @gotti_trades_bot upon new execution."""
+        side_icon = "🟢 BUY" if pos["side"] == "BUY" else "🔴 SELL"
+        msg = (
+            f"🚀 <b>NEW TRADE EXECUTED</b>\n\n"
+            f"<b>Strategy:</b> <code>{pos['strategy']}</code>\n"
+            f"<b>Asset:</b> <b>{pos['ticker']}</b> | {side_icon}\n"
+            f"<b>Quantity:</b> <code>{pos['quantity']:,}</code> shares\n"
+            f"<b>Entry Price:</b> <code>${pos['entry_price']:.2f}</code> (Alpaca Executed)\n"
+            f"<b>Total Capital:</b> <code>${notional:,.2f}</code> (<=5% cap)\n"
+            f"<b>Bracket SL:</b> <code>${pos['stop_loss']:.2f}</code> | <b>TP:</b> <code>${pos['take_profit']:.2f}</code>\n"
+            f"<b>Broker Order ID:</b> <code>{pos.get('alpaca_order_id') or 'N/A'}</code>\n"
+            f"<b>Confluence:</b> <i>{html.escape(reason)}</i>\n\n"
+            f"<i>⚡ Tracked live on Level 3 Diamond Hands ETF</i>"
+        )
+        self._notify_telegram(msg)
+
+    def _notify_trade_closed(self, pos: Dict[str, Any], exit_price: float, profit: float, exit_reason: str):
+        """Dispatches rich HTML alert to Telegram @gotti_trades_bot upon position close."""
+        pnl_badge = "🟢" if profit > 0 else ("🔴" if profit < 0 else "⚪")
+        cost = pos["quantity"] * pos["entry_price"]
+        pct = (profit / cost * 100) if cost > 0 else 0.0
+        msg = (
+            f"🏁 <b>POSITION CLOSED</b>\n\n"
+            f"<b>Strategy:</b> <code>{pos['strategy']}</code>\n"
+            f"<b>Asset:</b> <b>{pos['ticker']}</b> ({pos['side']})\n"
+            f"<b>Exit Price:</b> <code>${exit_price:.2f}</code> (Entry: ${pos['entry_price']:.2f})\n"
+            f"<b>Realized P&L:</b> {pnl_badge} <b><code>${profit:+,.2f}</code></b> (<b>{pct:+.2f}%</b>)\n"
+            f"<b>Exit Reason:</b> <code>{exit_reason}</code>\n"
+            f"<b>Executed At:</b> <code>{datetime.now(self.tz_est).strftime('%H:%M:%S EST')}</code>\n\n"
+            f"<i>💡 Use /trades or /pnl in @gotti_trades_bot to view updated performance.</i>"
+        )
+        self._notify_telegram(msg)
 
     def _update_account_balances(self):
         """Refreshes account balance and portfolio value from Alpaca broker."""
-        if self.broker and not self.dry_run:
+        if not self.dry_run and self.trading_client:
             try:
-                acct = self.broker.api.get_account()
-                self.portfolio_value = float(acct.portfolio_value)
-                self.buying_power = float(acct.buying_power)
+                acct = self.trading_client.get_account()
+                self.portfolio_value = float(acct.portfolio_value or self.initial_portfolio)
+                self.buying_power = float(acct.buying_power or self.initial_portfolio)
             except Exception:
                 pass
 
@@ -1405,7 +1689,7 @@ def main():
     parser.add_argument(
         "--strategies",
         type=str,
-        default="News_LiquiditySweep,MarketReactor_Fade,ZedStrategy_Institutional",
+        default="News_LiquiditySweep,MarketReactor_Fade,ZedStrategy_Institutional,MarketOpen_Catalyst",
         help="Comma-separated list of strategies to run"
     )
 
