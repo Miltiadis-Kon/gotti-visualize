@@ -148,19 +148,16 @@ class LiveNewsTraderService:
         self._init_broker()
 
         # Real-time event-driven signal observer (<5ms WebSocket + sub-second DB change detection)
+        # We pass on_signal_callback=None so signals are queued and processed sequentially in the main loop
         self.observer = RealTimeSignalObserver(
-            on_signal_callback=self._on_instant_signal_observed,
+            on_signal_callback=None,
             db_poll_interval_sec=1.0,
         )
 
     def _on_instant_signal_observed(self, sig: ReactorSignal):
-        """Callback fired immediately upon real-time signal detection (< 5ms via WS or < 1s via DB)."""
+        """Processes instant live signal (< 5ms via WS or < 1s via DB) sequentially."""
         logger.info(f"⚡ [OBSERVER EVENT] Processing instant live signal: {sig.ticker} {sig.signal_position}")
         self._process_single_signal(sig, is_historical=False)
-        now_est = datetime.now(self.tz_est)
-        phase, _ = self.get_market_session_state(now_est)
-        if phase == "REGULAR_TRADING":
-            self.evaluate_live_market()
 
     def _setup_signal_handlers(self):
         def handle_shutdown(signum, frame):
@@ -1271,6 +1268,18 @@ class LiveNewsTraderService:
         eod_flatten_time: dtime = dtime(15, 50),
     ):
         """Sizes position by conviction-weighted risk, submits to Alpaca, and records to DB."""
+        # Strict single-position protection: prevent duplicate orders for the same ticker
+        if any(p.get("ticker") == ticker for p in self.active_positions.values()):
+            logger.info(f"[{ticker}] Active position already open in state. Skipping duplicate execution.")
+            return
+
+        if ctx.get("trades_taken", 0) >= 1:
+            logger.info(f"[{ticker}] Maximum daily trades already reached (1/1). Skipping execution.")
+            return
+
+        # Mark trade immediately to lock out race conditions
+        ctx["trades_taken"] = ctx.get("trades_taken", 0) + 1
+
         # Conviction-weighted sizing: 1.0% to 2.5%
         comp_score = getattr(sig, "composite_conviction", 0.70)
         norm_score = max(0.0, min(1.0, (comp_score - 0.70) / 0.30))
@@ -1278,6 +1287,7 @@ class LiveNewsTraderService:
 
         risk_per_share = abs(entry_price - stop_loss)
         if risk_per_share <= 0:
+            ctx["trades_taken"] = max(0, ctx.get("trades_taken", 1) - 1)
             return
 
         portfolio_to_risk = self.portfolio_value or self.initial_portfolio
@@ -1307,6 +1317,7 @@ class LiveNewsTraderService:
                 f"[{ticker}] Calculated quantity is 0 shares (5% Cap=${max_trade_notional:,.2f} | "
                 f"Entry=${entry_price:.2f}). Skipping order execution."
             )
+            ctx["trades_taken"] = max(0, ctx.get("trades_taken", 1) - 1)
             return
 
         total_amount = round(qty * entry_price, 2)
@@ -1365,6 +1376,7 @@ class LiveNewsTraderService:
                     pass
             except Exception as e:
                 logger.error(f"❌ [Alpaca Order REJECTED/FAILED] Could not submit {side} order for {ticker}: {e}")
+                ctx["trades_taken"] = max(0, ctx.get("trades_taken", 1) - 1)
                 # CRITICAL: DO NOT RECORD REJECTED ORDERS TO DB!
                 return
 
@@ -1393,7 +1405,6 @@ class LiveNewsTraderService:
         pos_record["db_order_id"] = db_id
 
         self.active_positions[pos_id] = pos_record
-        ctx["trades_taken"] = ctx.get("trades_taken", 0) + 1
         self._persist_state()
 
         # Send Real-Time Alert to Telegram Trades Bot (@gotti_trades_bot)
